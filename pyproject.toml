@@ -27,7 +27,7 @@ powerfoam = [
 gsplat = [
   "gsplat==1.5.3",
 ]
-dev = ["pytest>=8", "ruff>=0.8"]
+dev = ["pytest>=8", "ruff==0.15.0"]
 
 [project.scripts]
 fffoam-train = "feedforwardfoam.train:main"
