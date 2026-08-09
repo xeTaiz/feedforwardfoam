@@ -224,11 +224,11 @@ class CanonicalGaussianHead(nn.Module):
         mean_residual = 0.05 * torch.tanh(values[:, :3])
         means = rays[:, :3] + (depth_selected[:, None] + mean_residual[:, :1]) * rays[:, 3:]
         # 3..5: per-axis scales, positive via exp().
-        scales = torch.exp(values[:, 3:6]).clamp_min(1e-5)
+        scales = 0.02 + torch.exp(values[:, 3:6]).clamp_min(1e-5)
         # 6..9: quaternions, normalized defensively (gsplat says optional).
         quats = F.normalize(values[:, 6:10], dim=-1, eps=1e-6)
         # 10: opacity.
-        opacities = torch.sigmoid(values[:, 10])
+        opacities = 0.1 + 0.9 * torch.sigmoid(values[:, 10])
         # 11..13: RGB post-activation.
         colors = torch.sigmoid(values[:, 11:14])
 

@@ -59,7 +59,7 @@ def test_canonical_gaussian_head_shapes_and_positive_scale():
 
     # Scale activation is exp() -> strictly positive; gsplat rejects non-positive scales.
     assert torch.all(params.scales > 0)
-    assert torch.allclose(params.scales.mean(), torch.tensor(0.02), atol=1e-4)
+    assert torch.allclose(params.scales.mean(), torch.tensor(0.04), atol=1e-4)
     # Opacity/colors are sigmoid -> bounded in [0, 1]; gsplat rejects out-of-range opacities.
     assert torch.all(params.opacities >= 0) and torch.all(params.opacities <= 1)
     assert torch.all(params.colors >= 0) and torch.all(params.colors <= 1)

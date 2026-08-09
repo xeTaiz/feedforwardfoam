@@ -78,7 +78,7 @@ class CanonicalPowerFoamHead(nn.Module):
             output.weight[:9].zero_()
             output.weight[10:].zero_()
             output.bias.zero_()
-            # softplus(raw, beta=10) + 0.01 ≈ 0.05
+            # 0.05 + softplus(raw, beta=10) ≈ 0.09
             output.bias[3] = -0.0709
             output.bias[4] = 1.0  # identity quaternion (wxyz)
             # Power Foam applies softplus(raw, beta=100): positive density avoids
@@ -142,9 +142,11 @@ class CanonicalPowerFoamHead(nn.Module):
 
         point_residual = 0.05 * torch.tanh(values[:, :3])
         points = rays[:, :3] + (depth_selected[:, None] + point_residual[:, :1]) * rays[:, 3:]
-        radii = 0.01 + F.softplus(values[:, 3], beta=10)
+        # P0 keeps every top-M cell active. A radius floor avoids the
+        # transparent/zero-gradient collapse before appearance has learned.
+        radii = 0.05 + F.softplus(values[:, 3], beta=10)
         quaternion = F.normalize(values[:, 4:8], dim=-1, eps=1e-6)
-        density = values[:, 8]
+        density = 0.1 + F.softplus(values[:, 8], beta=10)
 
         cursor = 10
         count = self.num_texel_sites * self.spherical_voronoi_dof * 3
