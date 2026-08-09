@@ -115,6 +115,12 @@ def train(
     for step in range(1, int(config["train"]["steps"]) + 1):
         episode = dataset[step % len(dataset)]
         images = _context_tensor(episode, device)
+        expected_resolution = config["backbone"].get("image_resolution")
+        if expected_resolution is not None and images.shape[-2:] != (expected_resolution, expected_resolution):
+            raise ValueError(
+                "Context image resolution does not match backbone.image_resolution: "
+                f"got {tuple(images.shape[-2:])}, expected {(expected_resolution, expected_resolution)}"
+            )
         with torch.inference_mode():
             features = backbone(images)
         ray_map = pinhole_ray_map_from_view(episode.context[0], device)

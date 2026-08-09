@@ -12,7 +12,8 @@ baseline:
   bkgd_color: [0.0, 0.0, 0.0]
 backbone:
   checkpoint: null             # Set to the gated VGGT-Omega-1B-512 checkpoint.
-  image_resolution: 512
+  # NeRF-Synthetic frames are 800²; 800 / 5 = 160, divisible by VGGT-Ω's 16px patch size.
+  image_resolution: 160
   allow_stub_backbone: false
 head:
   grid_stride: 16
@@ -22,7 +23,7 @@ data:
   context_views: 1
   target_views: 1
   min_overlap: 0.7
-  image_downsample: 4
+  image_downsample: 5
 train:
   steps: 500
   batch_size: 1
