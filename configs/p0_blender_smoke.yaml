@@ -1,0 +1,29 @@
+# Frozen VGGT-Ω -> canonical-view full Power Foam smoke experiment.
+seed: 7
+output_dir: runs/p0_blender_smoke
+backbone:
+  checkpoint: null  # Set to the gated VGGT-Omega-1B-512 checkpoint.
+  image_resolution: 512
+  allow_stub_backbone: false
+head:
+  grid_stride: 16
+  max_cells: 1024
+  num_texel_sites: 8
+  spherical_voronoi_dof: 8
+  hidden_dim: 256
+renderer:
+  render_objective: volume
+  is_pinhole: true
+  bkgd_color: [0.0, 0.0, 0.0]
+data:
+  context_views: 1
+  target_views: 1
+  min_overlap: 0.7
+  image_downsample: 4
+train:
+  steps: 500
+  batch_size: 1
+  learning_rate: 0.0003
+  rgb_loss: charbonnier
+  log_every: 10
+  validate_every: 100

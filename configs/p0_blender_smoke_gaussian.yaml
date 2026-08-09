@@ -1,0 +1,32 @@
+# Same-budget canonical-view 3DGS baseline using gsplat.
+# All values mirror configs/p0_blender_smoke.yaml so foam-vs-Gaussian
+# comparisons are apples-to-apples at matched primitive budget.
+seed: 7
+output_dir: runs/p0_blender_smoke_gaussian
+baseline:
+  type: gaussian
+  rasterize_mode: classic       # NOT "antialiased" -- Mip-Splatting's opacity compensation would break parity.
+  eps2d: 0.3
+  radius_clip: 0.0
+  tile_size: 16
+  bkgd_color: [0.0, 0.0, 0.0]
+backbone:
+  checkpoint: null             # Set to the gated VGGT-Omega-1B-512 checkpoint.
+  image_resolution: 512
+  allow_stub_backbone: false
+head:
+  grid_stride: 16
+  max_cells: 1024              # identical budget to the foam config
+  hidden_dim: 256
+data:
+  context_views: 1
+  target_views: 1
+  min_overlap: 0.7
+  image_downsample: 4
+train:
+  steps: 500
+  batch_size: 1
+  learning_rate: 0.0003
+  rgb_loss: charbonnier
+  log_every: 10
+  validate_every: 100
