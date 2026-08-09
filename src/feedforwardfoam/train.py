@@ -129,7 +129,11 @@ def train(
             features = backbone(images)
         ray_map = pinhole_ray_map_from_view(episode.context[0], device)
         params = head(images, features, ray_map)
-        target_view = episode.target[0]
+        target_view = (
+            episode.context[0]
+            if bool(config["train"].get("target_from_context", False))
+            else episode.target[0]
+        )
         target = target_view.image.to(device)
         if representation == "foam":
             render_output = bridge.render(params, camera_from_view(target_view, device))

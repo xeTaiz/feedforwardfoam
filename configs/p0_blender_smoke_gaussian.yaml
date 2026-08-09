@@ -33,3 +33,5 @@ train:
   validate_every: 100
   # Keep one context/held-out-target pair fixed for the initial convergence smoke.
   resample_episodes: false
+  # Kept false for NVS. Enable only for a same-view renderer-gradient smoke.
+  target_from_context: false
