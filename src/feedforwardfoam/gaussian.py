@@ -280,11 +280,12 @@ class GaussianRendererBridge:
 
         device = parameters.means.device
         camera = view_to_gsplat_camera(view, device)
-        # gsplat augments an RGB background with its depth channel internally
-        # for ``RGB+D``. Keep the single-camera dimension [C=1, RGB=3].
-        backgrounds = torch.tensor(
-            [list(self.bkgd_color)], device=device, dtype=parameters.colors.dtype
-        )
+        # gsplat 1.5.3's packed RGB+D path turns a [C, RGB] background into
+        # [C, RGB+D] internally, but its packed rasterizer subsequently expects
+        # no camera batch dimensions. Use its native zero background here; P0's
+        # configured background is intentionally black for both representations.
+        if any(value != 0.0 for value in self.bkgd_color):
+            raise ValueError("The packed gsplat RGB+D P0 baseline currently requires black background")
         render_colors, render_alphas, _ = rasterization(
             means=parameters.means,
             quats=parameters.quats,
@@ -302,7 +303,7 @@ class GaussianRendererBridge:
             sh_degree=None,
             packed=True,
             tile_size=self.tile_size,
-            backgrounds=backgrounds,
+            backgrounds=None,
             render_mode="RGB+D",
             rasterize_mode=self.rasterize_mode,
             camera_model="pinhole",
