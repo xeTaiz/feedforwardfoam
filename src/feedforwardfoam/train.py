@@ -112,8 +112,12 @@ def train(
         )
 
     history: list[dict[str, float]] = []
+    # A fixed held-out pair is required for the first per-scene convergence
+    # experiment. Later multi-pair training can opt into stochastic resampling.
+    resample_episodes = bool(config["train"].get("resample_episodes", False))
+    fixed_episode = initial_episode
     for step in range(1, int(config["train"]["steps"]) + 1):
-        episode = dataset[step % len(dataset)]
+        episode = dataset[step % len(dataset)] if resample_episodes else fixed_episode
         images = _context_tensor(episode, device)
         expected_resolution = config["backbone"].get("image_resolution")
         if expected_resolution is not None and images.shape[-2:] != (expected_resolution, expected_resolution):
@@ -134,10 +138,18 @@ def train(
         loss = _charbonnier(rendered, target)
         optimizer.zero_grad(set_to_none=True)
         loss.backward()
-        torch.nn.utils.clip_grad_norm_(head.parameters(), 1.0)
+        grad_norm = torch.nn.utils.clip_grad_norm_(head.parameters(), 1.0)
         optimizer.step()
 
-        record = {"step": float(step), "loss": float(loss.detach())}
+        record = {
+            "step": float(step),
+            "loss": float(loss.detach()),
+            "grad_norm": float(grad_norm),
+            "active_cells": float(params.points.shape[0]),
+            "render_rgb_mean": float(rendered.rgb.detach().mean()),
+            "render_alpha_mean": float(rendered.alpha.detach().mean()),
+            "mean_radius": float(params.radii.detach().mean()),
+        }
         if step % int(config["train"]["validate_every"]) == 0:
             metrics = _validate(rendered.detach(), target)
             record.update(metrics)

@@ -31,3 +31,5 @@ train:
   rgb_loss: charbonnier
   log_every: 10
   validate_every: 100
+  # Keep one context/held-out-target pair fixed for the initial convergence smoke.
+  resample_episodes: false
