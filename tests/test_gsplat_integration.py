@@ -13,6 +13,7 @@ import torch
 from feedforwardfoam.backbone import FrozenGeometryStub
 from feedforwardfoam.data.types import View
 from feedforwardfoam.gaussian import CanonicalGaussianHead, GaussianRendererBridge
+from feedforwardfoam.renderer import pinhole_ray_map_from_view
 
 
 @pytest.mark.integration
@@ -34,7 +35,7 @@ def test_canonical_gaussian_head_renders_and_backpropagates_image_loss():
     bridge = GaussianRendererBridge()
     # Use the source view as the canonical anchor; render from the target view.
     canonical_view = source
-    params = head(images, features, _canonical_rays(canonical_view, device))
+    params = head(images, features, pinhole_ray_map_from_view(canonical_view, device))
     rendered = bridge.render(params, target)
     assert rendered.rgb.shape == target.image.shape
     assert rendered.alpha.shape == target.image.shape[:-1]
@@ -43,11 +44,3 @@ def test_canonical_gaussian_head_renders_and_backpropagates_image_loss():
     loss.backward()
     grads = [parameter.grad for parameter in head.parameters() if parameter.grad is not None]
     assert grads and all(torch.isfinite(grad).all() for grad in grads)
-
-
-def _canonical_rays(view: View, device: torch.device) -> torch.Tensor:
-    height, width = view.image.shape[:2]
-    rays = torch.zeros(height, width, 6)
-    rays[..., 2] = 1.0  # z origin
-    rays[..., 5] = 1.0  # z direction (toward +z forward in OpenCV camera frame)
-    return rays.to(device)
