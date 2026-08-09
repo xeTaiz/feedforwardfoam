@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Protocol
 
 import torch
-import torch.nn as nn
+from torch import nn
 
 
 class GeometryFeatures(Protocol):
@@ -60,7 +60,7 @@ class FrozenGeometryStub(nn.Module):
     @torch.inference_mode()
     def forward(self, images: torch.Tensor) -> dict[str, torch.Tensor]:
         # images: [B, V, 3, H, W]
-        b, v, _, h, w = images.shape
+        b, v, _, _h, _w = images.shape
         luminance = images.mean(dim=2, keepdim=True)
         depth = 1.0 + 0.1 * luminance
         confidence = torch.ones_like(depth)

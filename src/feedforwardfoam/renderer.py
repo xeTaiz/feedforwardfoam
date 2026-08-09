@@ -54,7 +54,7 @@ def powerfoam_args(
     )
 
 
-def pinhole_ray_map_from_view(view: "View", device: torch.device | str) -> torch.Tensor:
+def pinhole_ray_map_from_view(view: View, device: torch.device | str) -> torch.Tensor:
     """Return H×W world-space pinhole origins/directions without an upstream dependency."""
     c2w = view.c2w.to(device=device, dtype=torch.float32)
     height, width = view.image.shape[:2]
@@ -75,7 +75,7 @@ def pinhole_ray_map_from_view(view: "View", device: torch.device | str) -> torch
     return torch.cat([origins, directions], dim=-1)
 
 
-def camera_from_view(view: "View", device: torch.device | str):
+def camera_from_view(view: View, device: torch.device | str):
     """Convert a normalised c2w pose and horizontal FoV to Power Foam's camera."""
     require_powerfoam()
     from powerfoam.camera import TorchCamera
@@ -130,7 +130,7 @@ class PowerFoamRendererBridge:
         self._rasterizer_cls = Rasterizer
         self.reference_camera = reference_camera
 
-    def build(self, parameters: "FoamParameters"):
+    def build(self, parameters: FoamParameters):
         scene = self._scene_cls(self.args)
         # Avoid nn.Module parameter registration: preserve the upstream graph
         # back to the decoder rather than making detached optimization variables.
@@ -148,7 +148,7 @@ class PowerFoamRendererBridge:
         object.__setattr__(scene, "sv", sv)
         return scene
 
-    def render(self, parameters: "FoamParameters", camera) -> FoamRender:
+    def render(self, parameters: FoamParameters, camera) -> FoamRender:
         result = self.build(parameters).forward(camera)
         # Upstream ordering: RGB, alpha/transmittance auxiliaries, normal, depth.
         return FoamRender(rgb=result[0], alpha=result[1], normal=result[3], depth=result[4])
