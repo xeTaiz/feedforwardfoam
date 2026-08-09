@@ -1,0 +1,6 @@
+[submodule "external/vggt-omega"]
+	path = external/vggt-omega
+	url = https://github.com/facebookresearch/vggt-omega.git
+[submodule "external/powerfoam"]
+	path = external/powerfoam
+	url = https://github.com/theialab/powerfoam.git
