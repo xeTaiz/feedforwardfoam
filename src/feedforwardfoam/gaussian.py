@@ -280,11 +280,10 @@ class GaussianRendererBridge:
 
         device = parameters.means.device
         camera = view_to_gsplat_camera(view, device)
-        # gsplat's packed rasterizer expects a channel vector (not a [C, D]
-        # batch) for a single-camera call. RGB+D needs an explicit background
-        # depth channel in addition to RGB.
+        # gsplat augments an RGB background with its depth channel internally
+        # for ``RGB+D``. Keep the single-camera dimension [C=1, RGB=3].
         backgrounds = torch.tensor(
-            [*self.bkgd_color, 0.0], device=device, dtype=parameters.colors.dtype
+            [list(self.bkgd_color)], device=device, dtype=parameters.colors.dtype
         )
         render_colors, render_alphas, _ = rasterization(
             means=parameters.means,
