@@ -15,6 +15,17 @@ class GeometryFeatures(Protocol):
     registers: torch.Tensor
 
 
+def _channel_first_dense_map(values: torch.Tensor) -> torch.Tensor:
+    """Normalize VGGT-Ω dense outputs to the P0 ``[B,V,1,H,W]`` contract."""
+    if values.ndim == 4:  # confidence: [B,V,H,W]
+        return values.unsqueeze(2)
+    if values.ndim == 5 and values.shape[-1] == 1:  # depth: [B,V,H,W,1]
+        return values.movedim(-1, 2)
+    if values.ndim == 5 and values.shape[2] == 1:
+        return values
+    raise ValueError(f"Expected a single-channel dense map, got shape {tuple(values.shape)}")
+
+
 class FrozenVGGTOmega(nn.Module):
     """Inference-only VGGT-Ω adapter.
 
@@ -46,8 +57,8 @@ class FrozenVGGTOmega(nn.Module):
         prediction = self.model(images)
         camera_and_registers = prediction["camera_and_register_tokens"]
         return {
-            "depth": prediction["depth"],
-            "depth_conf": prediction["depth_conf"],
+            "depth": _channel_first_dense_map(prediction["depth"]),
+            "depth_conf": _channel_first_dense_map(prediction["depth_conf"]),
             "registers": camera_and_registers[:, :, 1:],
         }
 
