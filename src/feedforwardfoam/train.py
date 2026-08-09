@@ -66,7 +66,7 @@ def train(
         if checkpoint is None:
             raise ValueError("VGGT-Ω checkpoint is required; pass --checkpoint or --use-stub-backbone")
         backbone = FrozenVGGTOmega(checkpoint).to(device)
-        register_dim = 1024
+        register_dim = backbone.register_dim
     backbone.eval()
 
     head_cfg = config["head"]

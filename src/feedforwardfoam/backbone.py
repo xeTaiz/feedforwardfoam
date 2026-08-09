@@ -32,6 +32,9 @@ class FrozenVGGTOmega(nn.Module):
         from vggt_omega.models import VGGTOmega
 
         self.model = VGGTOmega()
+        # The dense heads consume concatenated intermediate/final token features,
+        # so the exposed camera/register stream is 2× the aggregator width.
+        self.register_dim = 2 * self.model.aggregator.camera_token.shape[-1]
         state = torch.load(checkpoint, map_location="cpu", weights_only=True)
         self.model.load_state_dict(state)
         self.model.eval()
