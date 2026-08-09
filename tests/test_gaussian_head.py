@@ -59,6 +59,7 @@ def test_canonical_gaussian_head_shapes_and_positive_scale():
 
     # Scale activation is exp() -> strictly positive; gsplat rejects non-positive scales.
     assert torch.all(params.scales > 0)
+    assert torch.allclose(params.scales.mean(), torch.tensor(0.02), atol=1e-4)
     # Opacity/colors are sigmoid -> bounded in [0, 1]; gsplat rejects out-of-range opacities.
     assert torch.all(params.opacities >= 0) and torch.all(params.opacities <= 1)
     assert torch.all(params.colors >= 0) and torch.all(params.colors <= 1)
@@ -96,7 +97,7 @@ def test_canonical_gaussian_head_is_smaller_than_foam_head():
     """Budget parity sanity check: the Gaussian head must not be larger.
 
     The 3DGS head shares its local CNN + register projection with the foam head
-    but emits far fewer per-patch output channels (14 vs. 395), so the Gaussian
+    but emits far fewer per-patch output channels (14 vs. 394), so the Gaussian
     head's trainable parameter count must be strictly smaller at the default
     configuration.
     """

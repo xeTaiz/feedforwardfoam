@@ -23,6 +23,10 @@ def test_canonical_head_produces_full_powerfoam_tensors_and_gradients():
     assert params.texel_sv_axis.shape == (6, 8, 24)
     assert params.texel_sv_rgb.shape == (6, 8, 24)
     assert torch.count_nonzero(params.texel_height) == 0
+    # Decoder initialization must produce nonzero Power Foam density; an empty
+    # volume has no photometric gradient in the initial P0 smoke experiment.
+    assert torch.all(params.density > 0)
+    assert torch.allclose(params.radii.mean(), torch.tensor(0.05), atol=1e-3)
 
     loss = sum(value.square().mean() for value in params.as_upstream_tensors().values())
     loss.backward()

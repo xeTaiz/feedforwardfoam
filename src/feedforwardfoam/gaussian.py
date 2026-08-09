@@ -152,6 +152,20 @@ class CanonicalGaussianHead(nn.Module):
             nn.GELU(),
             nn.Linear(hidden_dim, self.OUTPUT_DIM),
         )
+        self._initialize_decoder()
+
+    def _initialize_decoder(self) -> None:
+        """Start with compact, non-empty splats for a stable image-loss signal."""
+        output = self.decode[-1]
+        assert isinstance(output, nn.Linear)
+        with torch.no_grad():
+            # Keep the opacity/gate row's random weights for non-degenerate top-M.
+            output.weight[:10].zero_()
+            output.weight[11:].zero_()
+            output.bias.zero_()
+            output.bias[3:6] = torch.log(torch.tensor(0.02))
+            output.bias[6] = 1.0  # identity quaternion (wxyz)
+            output.bias[10] = -2.0
 
     @staticmethod
     def _canonical_maps(

@@ -67,6 +67,23 @@ class CanonicalPowerFoamHead(nn.Module):
         self.decode = nn.Sequential(
             nn.Linear(hidden_dim, hidden_dim), nn.GELU(), nn.Linear(hidden_dim, self.output_dim)
         )
+        self._initialize_decoder()
+
+    def _initialize_decoder(self) -> None:
+        """Start with visible, compact cells rather than an empty renderer."""
+        output = self.decode[-1]
+        assert isinstance(output, nn.Linear)
+        with torch.no_grad():
+            # Retain the learned gate row so top-M selects spatially varying anchors.
+            output.weight[:9].zero_()
+            output.weight[10:].zero_()
+            output.bias.zero_()
+            # softplus(raw, beta=10) + 0.01 ≈ 0.05
+            output.bias[3] = -0.0709
+            output.bias[4] = 1.0  # identity quaternion (wxyz)
+            # Power Foam applies softplus(raw, beta=100): positive density avoids
+            # a zero-alpha / zero-gradient initialization.
+            output.bias[8] = 0.1
 
     @staticmethod
     def _canonical_maps(
