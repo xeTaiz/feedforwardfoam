@@ -132,9 +132,10 @@ def train(
         target_view = episode.target[0]
         target = target_view.image.to(device)
         if representation == "foam":
-            rendered = bridge.render(params, camera_from_view(target_view, device)).rgb
+            render_output = bridge.render(params, camera_from_view(target_view, device))
         else:
-            rendered = bridge.render(params, target_view).rgb
+            render_output = bridge.render(params, target_view)
+        rendered = render_output.rgb
         loss = _charbonnier(rendered, target)
         optimizer.zero_grad(set_to_none=True)
         loss.backward()
@@ -145,10 +146,12 @@ def train(
             "step": float(step),
             "loss": float(loss.detach()),
             "grad_norm": float(grad_norm),
-            "active_cells": float(params.points.shape[0]),
-            "render_rgb_mean": float(rendered.rgb.detach().mean()),
-            "render_alpha_mean": float(rendered.alpha.detach().mean()),
-            "mean_radius": float(params.radii.detach().mean()),
+            "active_cells": float(params.points.shape[0] if representation == "foam" else params.means.shape[0]),
+            "render_rgb_mean": float(rendered.detach().mean()),
+            "render_alpha_mean": float(render_output.alpha.detach().mean()),
+            "mean_radius": float(
+                params.radii.detach().mean() if representation == "foam" else params.scales.detach().mean()
+            ),
         }
         if step % int(config["train"]["validate_every"]) == 0:
             metrics = _validate(rendered.detach(), target)
