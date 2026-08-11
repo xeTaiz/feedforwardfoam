@@ -17,6 +17,7 @@ class View:
     c2w: torch.Tensor
     fov_x_radians: float
     name: str
+    alpha: torch.Tensor | None = None
 
 
 @dataclass(frozen=True)

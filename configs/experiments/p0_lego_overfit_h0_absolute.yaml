@@ -1,0 +1,36 @@
+seed: 7
+output_dir: runs/p0_lego_overfit_h0_absolute
+backbone:
+  checkpoint: null
+  image_resolution: 160
+  allow_stub_backbone: false
+head:
+  grid_stride: 1
+  max_cells: 25600
+  num_texel_sites: 8
+  spherical_voronoi_dof: 8
+  hidden_dim: 256
+  radius_mode: learned_absolute
+  radius_scale_init: 1.5
+  density_mode: learned
+  fixed_density: 100.0
+  initialize_rgb_from_image: true
+renderer:
+  render_objective: volume
+  is_pinhole: true
+  bkgd_color: [0.0, 0.0, 0.0]
+data:
+  context_views: 1
+  target_views: 1
+  min_overlap: 0.7
+  image_downsample: 5
+train:
+  steps: 30
+  batch_size: 1
+  learning_rate: 0.0001
+  rgb_loss: charbonnier
+  log_every: 1
+  validate_every: 5
+  resample_episodes: false
+  target_from_context: true
+  alpha_loss_weight: 0.0

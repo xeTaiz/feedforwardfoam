@@ -1,0 +1,42 @@
+# Run from external/powerfoam with this repository-relative config path.
+iterations: 200
+densify_from: 1000
+densify_until: 0
+normal_weight: 0.1
+contribution_weight: 0.1
+interpenetration_weight: 1.0e-4
+experiment_name: lego_oracle_o0_5k_200
+
+dataset: blender
+data_path: /code/feedforwardfoam-project/data/processed/nerf_synthetic
+scene: lego
+alpha_format_on_disk: straight
+downsample: [5]
+downsample_iterations: [0]
+is_pinhole: true
+eval: false
+
+init_type: random_unbounded
+init_points: 5000
+final_points: 5000
+bkgd_color: [0.0, 0.0, 0.0]
+render_objective: volume
+sv_dof: 8
+num_texel_sites: 8
+
+points_lr_init: 1.0e-3
+points_lr_final: 5.0e-5
+density_lr_init: 1.0
+density_lr_final: 1.0
+radii_lr_init: 5.0e-5
+radii_lr_final: 5.0e-6
+quaternions_lr_init: 1.0e-1
+quaternions_lr_final: 1.0e-2
+texel_sites_lr_init: 1.0e-2
+texel_sites_lr_final: 1.0e-3
+texel_sv_axis_lr_init: 5.0e-2
+texel_sv_axis_lr_final: 5.0e-3
+texel_sv_rgb_lr_init: 5.0e-3
+texel_sv_rgb_lr_final: 5.0e-4
+texel_height_lr_init: 5.0e-3
+texel_height_lr_final: 5.0e-4

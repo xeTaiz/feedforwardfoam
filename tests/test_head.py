@@ -31,3 +31,32 @@ def test_canonical_head_produces_full_powerfoam_tensors_and_gradients():
     loss = sum(value.square().mean() for value in params.as_upstream_tensors().values())
     loss.backward()
     assert any(parameter.grad is not None for parameter in head.parameters())
+
+
+def test_geometry_aware_head_uses_pixel_footprint_and_fixed_density():
+    head = CanonicalPowerFoamHead(
+        register_dim=8,
+        hidden_dim=16,
+        max_cells=20,
+        radius_mode="pixel_footprint",
+        radius_scale_init=2.0,
+        density_mode="fixed",
+        fixed_density=50.0,
+        initialize_rgb_from_image=True,
+    )
+    images = torch.full((1, 1, 3, 4, 5), 0.25)
+    features = {
+        "depth": torch.full((1, 1, 1, 4, 5), 2.0),
+        "depth_conf": torch.ones(1, 1, 1, 4, 5),
+        "registers": torch.zeros(1, 1, 2, 8),
+    }
+    rays = torch.zeros(4, 5, 6)
+    rays[..., 3] = torch.linspace(-0.2, 0.2, 5)[None]
+    rays[..., 4] = torch.linspace(0.15, -0.15, 4)[:, None]
+    rays[..., 5] = 1.0
+    rays[..., 3:] = torch.nn.functional.normalize(rays[..., 3:], dim=-1)
+
+    params = head(images, features, rays)
+    assert torch.all(params.radii > 0)
+    assert torch.allclose(params.density, torch.full_like(params.density, 50.0))
+    assert torch.allclose(params.texel_sv_rgb.mean(), torch.tensor(0.25), atol=1e-3)

@@ -49,11 +49,25 @@ class CanonicalPowerFoamHead(nn.Module):
         max_cells: int = 1024,
         num_texel_sites: int = 8,
         spherical_voronoi_dof: int = 8,
+        radius_mode: str = "learned_absolute",
+        radius_scale_init: float = 1.5,
+        density_mode: str = "learned",
+        fixed_density: float = 100.0,
+        initialize_rgb_from_image: bool = False,
     ) -> None:
         super().__init__()
+        if radius_mode not in {"learned_absolute", "pixel_footprint"}:
+            raise ValueError(f"Unknown radius mode: {radius_mode}")
+        if density_mode not in {"learned", "fixed"}:
+            raise ValueError(f"Unknown density mode: {density_mode}")
         self.max_cells = max_cells
         self.num_texel_sites = num_texel_sites
         self.spherical_voronoi_dof = spherical_voronoi_dof
+        self.radius_mode = radius_mode
+        self.radius_scale_init = radius_scale_init
+        self.density_mode = density_mode
+        self.fixed_density = fixed_density
+        self.initialize_rgb_from_image = initialize_rgb_from_image
         self.local = nn.Sequential(
             nn.Conv2d(5, hidden_dim, 3, padding=1),
             nn.GELU(),
@@ -78,8 +92,9 @@ class CanonicalPowerFoamHead(nn.Module):
             output.weight[:9].zero_()
             output.weight[10:].zero_()
             output.bias.zero_()
-            # 0.05 + softplus(raw, beta=10) ≈ 0.09
-            output.bias[3] = -0.0709
+            # learned_absolute: 0.05 + softplus(raw, beta=10) ≈ 0.09.
+            # pixel_footprint: raw zero gives exactly radius_scale_init.
+            output.bias[3] = -0.0709 if self.radius_mode == "learned_absolute" else 0.0
             output.bias[4] = 1.0  # identity quaternion (wxyz)
             # Power Foam applies softplus(raw, beta=100): positive density avoids
             # a zero-alpha / zero-gradient initialization.
@@ -142,11 +157,28 @@ class CanonicalPowerFoamHead(nn.Module):
 
         point_residual = 0.05 * torch.tanh(values[:, :3])
         points = rays[:, :3] + (depth_selected[:, None] + point_residual[:, :1]) * rays[:, 3:]
-        # P0 keeps every top-M cell active. A radius floor avoids the
-        # transparent/zero-gradient collapse before appearance has learned.
-        radii = 0.05 + F.softplus(values[:, 3], beta=10)
+        if self.radius_mode == "pixel_footprint":
+            ray_directions = ray_map[:, 3:].reshape(h, w, 3)
+            dx = torch.linalg.vector_norm(ray_directions[:, 1:] - ray_directions[:, :-1], dim=-1)
+            dy = torch.linalg.vector_norm(ray_directions[1:] - ray_directions[:-1], dim=-1)
+            footprint = torch.zeros(h, w, device=values.device, dtype=values.dtype)
+            footprint[:, :-1] += dx
+            footprint[:, 1:] += dx
+            footprint[:-1] += dy
+            footprint[1:] += dy
+            counts = torch.full_like(footprint, 4.0)
+            counts[:, (0, -1)] -= 1
+            counts[(0, -1), :] -= 1
+            footprint = depth[0, 0] * footprint / counts
+            scale = self.radius_scale_init * torch.exp(0.25 * torch.tanh(values[:, 3]))
+            radii = footprint.reshape(-1)[selected].clamp_min(1e-4) * scale
+        else:
+            radii = 0.05 + F.softplus(values[:, 3], beta=10)
         quaternion = F.normalize(values[:, 4:8], dim=-1, eps=1e-6)
-        density = 0.1 + F.softplus(values[:, 8], beta=10)
+        if self.density_mode == "fixed":
+            density = torch.full_like(values[:, 8], self.fixed_density)
+        else:
+            density = 0.1 + F.softplus(values[:, 8], beta=10)
 
         cursor = 10
         count = self.num_texel_sites * self.spherical_voronoi_dof * 3
@@ -159,9 +191,14 @@ class CanonicalPowerFoamHead(nn.Module):
             (self.spherical_voronoi_dof + 2) // 3, 1
         )[: self.spherical_voronoi_dof]
         axis = F.normalize(axis + canonical_axes[None, None], dim=-1, eps=1e-6)
-        rgb = torch.sigmoid(values[:, cursor : cursor + count]).reshape(
+        rgb_logits = values[:, cursor : cursor + count].reshape(
             m, self.num_texel_sites, self.spherical_voronoi_dof, 3
         )
+        if self.initialize_rgb_from_image:
+            source_rgb = image[0].permute(1, 2, 0).reshape(-1, 3)[selected]
+            source_logits = torch.logit(source_rgb.clamp(1e-4, 1 - 1e-4))
+            rgb_logits = rgb_logits + source_logits[:, None, None]
+        rgb = torch.sigmoid(rgb_logits)
 
         # Keep full upstream shapes. P0 constrains, rather than removes, 2D
         # surface texture: all sites are tied at the dipole and height is zero.

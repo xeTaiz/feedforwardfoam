@@ -77,6 +77,11 @@ def train(
             max_cells=int(head_cfg["max_cells"]),
             num_texel_sites=int(head_cfg["num_texel_sites"]),
             spherical_voronoi_dof=int(head_cfg["spherical_voronoi_dof"]),
+            radius_mode=str(head_cfg.get("radius_mode", "learned_absolute")),
+            radius_scale_init=float(head_cfg.get("radius_scale_init", 1.5)),
+            density_mode=str(head_cfg.get("density_mode", "learned")),
+            fixed_density=float(head_cfg.get("fixed_density", 100.0)),
+            initialize_rgb_from_image=bool(head_cfg.get("initialize_rgb_from_image", False)),
         ).to(device)
     elif representation == "gaussian":
         head = CanonicalGaussianHead(
@@ -140,7 +145,14 @@ def train(
         else:
             render_output = bridge.render(params, target_view)
         rendered = render_output.rgb
-        loss = _charbonnier(rendered, target)
+        rgb_loss = _charbonnier(rendered, target)
+        alpha_loss = torch.zeros((), device=device)
+        alpha_weight = float(config["train"].get("alpha_loss_weight", 0.0))
+        if alpha_weight > 0:
+            if target_view.alpha is None:
+                raise ValueError("alpha_loss_weight requires target alpha from the dataset")
+            alpha_loss = F.l1_loss(render_output.alpha, target_view.alpha.to(device))
+        loss = rgb_loss + alpha_weight * alpha_loss
         optimizer.zero_grad(set_to_none=True)
         loss.backward()
         grad_norm = torch.nn.utils.clip_grad_norm_(head.parameters(), 1.0)
@@ -149,6 +161,8 @@ def train(
         record = {
             "step": float(step),
             "loss": float(loss.detach()),
+            "rgb_loss": float(rgb_loss.detach()),
+            "alpha_loss": float(alpha_loss.detach()),
             "grad_norm": float(grad_norm),
             "active_cells": float(params.points.shape[0] if representation == "foam" else params.means.shape[0]),
             "render_rgb_mean": float(rendered.detach().mean()),
