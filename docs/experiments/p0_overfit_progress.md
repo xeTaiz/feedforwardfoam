@@ -1,6 +1,6 @@
 # P0 single-scene overfit progress
 
-Status: in progress
+Status: complete for the initial O0/H0–H5 matrix
 
 ## Goal
 
@@ -10,13 +10,13 @@ Before held-out NVS, establish that (1) upstream Power Foam can optimize the Leg
 
 | ID | Representation / optimization | Radius initialization | Density / alpha mitigation | Status |
 |---|---|---|---|---|
-| O0 | Upstream per-scene Power Foam oracle | Upstream kNN/camera-footprint initialization | Upstream learned density | pending |
-| H0 | P0 head, all 160×160 pixels | Learned absolute radius | Learned density, RGB only | pending |
-| H1 | P0 head, all 160×160 pixels | Depth × neighboring-ray pixel footprint × learned scale | Learned density, RGB only | pending |
-| H2 | Same as H1 | Geometry-aware | Learned density + foreground alpha loss | pending |
+| O0 | Upstream per-scene Power Foam oracle, 5k cells/2k steps | Upstream kNN/camera-footprint initialization | Upstream learned density | complete |
+| H0 | P0 head, all 160×160 pixels | Learned absolute radius | Learned density, RGB only | complete |
+| H1 | P0 head, all 160×160 pixels | Depth × neighboring-ray pixel footprint × learned scale | Learned density, RGB only | complete |
+| H2 | Same as H1 | Geometry-aware | Learned density + foreground alpha loss | complete |
 | H3 | Same as H1 | Geometry-aware | Fixed high Beer–Lambert density for every pixel, RGB only | complete |
-| H4 | Same as H1 | Geometry-aware | Fixed high density only for source-foreground cells | 30-step complete; 100-step running |
-| H5 | Same as H4 | Geometry-aware | Foreground-masked fixed density + foreground alpha loss | running |
+| H4 | Same as H1 | Geometry-aware | Fixed high density only for source-foreground cells | complete |
+| H5 | Same as H4 | Geometry-aware | Foreground-masked fixed density + foreground alpha loss | complete |
 
 All H-runs use one fixed Lego canonical view as both context and target, frozen VGGT-Ω, full unmodified Power Foam renderer, 160×160 images, and one cell per input pixel (25,600 cells). This is an overfit/conditioning test, not held-out NVS evidence.
 
@@ -30,7 +30,25 @@ All H-runs use one fixed Lego canonical view as both context and target, frozen 
 - 2026-08-09: H3 completed: fixed density prevented collapse (alpha ~0.71) but made background cells opaque and hurt RGB fitting; RGB loss 0.3203→best 0.2886, ending 0.2904, PSNR 9.84 dB. This motivates H4 foreground-masked fixed density.
 - 2026-08-09: H0 completed: learned absolute radii recovered from an initial alpha decline and reached 13.43 dB / RGB loss 0.1201 / alpha 0.0601 at step 30.
 - 2026-08-09: H4 completed 30 steps: foreground-masked fixed density reached 20.63 dB and RGB loss 0.04353; alpha stayed nonzero (0.229→0.218). This is the first successful same-view P0 head overfit signal. Extended H4 to 100 steps and added H5 with alpha loss.
-- 2026-08-09: First O0 invocation exposed upstream Blender's `eval: false` requirement for `transforms_all.json`; switched oracle config to `eval: true`. The 5k-cell/200-step upstream oracle trained successfully but only reached held-out-test PSNR 12.10 dB, SSIM 0.305, LPIPS 0.621; extended to 2,000 steps because 200 steps is not a meaningful oracle ceiling.
+- 2026-08-09: First O0 invocation exposed upstream Blender's `eval: false` requirement for `transforms_all.json`; switched oracle config to `eval: true`. The 5k-cell/200-step upstream oracle reached held-out-test PSNR 12.10 dB, SSIM 0.305, LPIPS 0.621. At 2,000 steps it improved to PSNR 14.13 dB, SSIM 0.487, LPIPS 0.489. This confirms optimization is working but is not a saturated upstream ceiling (small 5k budget, only 2k steps, 100-view scene fitting).
+- 2026-08-09: H4 at 100 steps ended RGB loss 0.04293 / PSNR 20.69 dB / alpha 0.216; best PSNR was 20.71 dB at step 40. It plateaued rather than reaching a near-perfect image fit.
+- 2026-08-09: H5 at 100 steps ended RGB loss 0.04839 / PSNR 19.55 dB / alpha 0.237; best PSNR 19.88 dB. Alpha supervision increased mean alpha/radius but degraded RGB relative to H4, so weight 1.0 is too strong once density is foreground-masked.
+
+## Result summary
+
+| ID | Steps | Final/best PSNR | RGB loss | Mean alpha | Mean radius | Interpretation |
+|---|---:|---:|---:|---:|---:|---|
+| O0 | 2,000 | 14.13 dB held-out average | upstream composite objective | — | upstream kNN | Working scene optimizer, not saturated |
+| H0 | 30 | 13.43 dB | 0.12015 | 0.0601 | 0.0758 | Absolute radius eventually recovers, inefficient |
+| H1 | 30 | 11.78 dB | 0.12803 | 0.0148 | 0.00726 | Footprint scale is well-conditioned but density remains too weak |
+| H2 | 30 | 11.40 dB | 0.13173 | 0.00145 | 0.00471 | Alpha loss cannot create raster support on missing rays |
+| H3 | 30 | 9.84 dB | 0.29040 | 0.7123 | 0.00472 | Opaque background cells are harmful |
+| H4 | 100 | **20.71 dB best** | **0.04293 final** | 0.2163 | 0.00472 | Best arm: footprint radius + source RGB + foreground-masked fixed density |
+| H5 | 100 | 19.88 dB best | 0.04839 final | 0.2374 | 0.00774 | Alpha weight 1 raises coverage but hurts RGB |
+
+## Decision
+
+Use pixel-footprint radius initialization with a predicted bounded multiplicative scale. For the first P0 stage, do not predict unconstrained density: initialize/fix high density only on source-foreground cells (effectively opaque Beer–Lambert segments) and leave background cells empty. Do not use a full-strength global alpha L1 term; revisit a small foreground-only weight after held-out geometry is stable. H4 is a successful non-collapse same-view overfit signal, but its 20.7 dB plateau means it is not yet a near-perfect oracle fit and must not be presented as held-out NVS evidence.
 
 ## Reporting contract
 
