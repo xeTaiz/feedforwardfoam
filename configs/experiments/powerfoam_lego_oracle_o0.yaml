@@ -14,7 +14,7 @@ alpha_format_on_disk: straight
 downsample: [5]
 downsample_iterations: [0]
 is_pinhole: true
-eval: false
+eval: true
 
 init_type: random_unbounded
 init_points: 5000

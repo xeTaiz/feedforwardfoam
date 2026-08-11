@@ -133,7 +133,10 @@ def train(
         with torch.inference_mode():
             features = backbone(images)
         ray_map = pinhole_ray_map_from_view(episode.context[0], device)
-        params = head(images, features, ray_map)
+        if representation == "foam":
+            params = head(images, features, ray_map, episode.context[0].alpha)
+        else:
+            params = head(images, features, ray_map)
         target_view = (
             episode.context[0]
             if bool(config["train"].get("target_from_context", False))

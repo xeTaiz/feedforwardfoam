@@ -58,7 +58,7 @@ class CanonicalPowerFoamHead(nn.Module):
         super().__init__()
         if radius_mode not in {"learned_absolute", "pixel_footprint"}:
             raise ValueError(f"Unknown radius mode: {radius_mode}")
-        if density_mode not in {"learned", "fixed"}:
+        if density_mode not in {"learned", "fixed", "source_alpha_fixed"}:
             raise ValueError(f"Unknown density mode: {density_mode}")
         self.max_cells = max_cells
         self.num_texel_sites = num_texel_sites
@@ -122,6 +122,7 @@ class CanonicalPowerFoamHead(nn.Module):
         images: torch.Tensor,
         frozen_features: dict[str, torch.Tensor],
         canonical_ray_map: torch.Tensor,
+        canonical_alpha: torch.Tensor | None = None,
     ) -> FoamParameters:
         """Decode a batch-size-one canonical scene.
 
@@ -177,6 +178,15 @@ class CanonicalPowerFoamHead(nn.Module):
         quaternion = F.normalize(values[:, 4:8], dim=-1, eps=1e-6)
         if self.density_mode == "fixed":
             density = torch.full_like(values[:, 8], self.fixed_density)
+        elif self.density_mode == "source_alpha_fixed":
+            if canonical_alpha is None:
+                raise ValueError("source_alpha_fixed density requires a canonical alpha mask")
+            alpha_selected = canonical_alpha.to(values).reshape(-1)[selected]
+            density = torch.where(
+                alpha_selected > 0.5,
+                torch.full_like(alpha_selected, self.fixed_density),
+                torch.full_like(alpha_selected, -1.0),
+            )
         else:
             density = 0.1 + F.softplus(values[:, 8], beta=10)
 

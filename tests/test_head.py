@@ -60,3 +60,26 @@ def test_geometry_aware_head_uses_pixel_footprint_and_fixed_density():
     assert torch.all(params.radii > 0)
     assert torch.allclose(params.density, torch.full_like(params.density, 50.0))
     assert torch.allclose(params.texel_sv_rgb.mean(), torch.tensor(0.25), atol=1e-3)
+
+
+def test_source_alpha_fixed_density_makes_background_cells_empty():
+    head = CanonicalPowerFoamHead(
+        register_dim=8,
+        hidden_dim=16,
+        max_cells=4,
+        density_mode="source_alpha_fixed",
+        fixed_density=100.0,
+    )
+    images = torch.ones(1, 1, 3, 2, 2)
+    features = {
+        "depth": torch.ones(1, 1, 1, 2, 2),
+        "depth_conf": torch.ones(1, 1, 1, 2, 2),
+        "registers": torch.zeros(1, 1, 2, 8),
+    }
+    rays = torch.zeros(2, 2, 6)
+    rays[..., 5] = 1
+    alpha = torch.tensor([[1.0, 0.0], [1.0, 0.0]])
+
+    params = head(images, features, rays, alpha)
+    assert torch.count_nonzero(params.density == 100.0) == 2
+    assert torch.count_nonzero(params.density == -1.0) == 2
