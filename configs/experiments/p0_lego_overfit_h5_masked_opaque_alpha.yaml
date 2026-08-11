@@ -1,5 +1,5 @@
 seed: 7
-output_dir: runs/p0_lego_overfit_h4_masked_opaque
+output_dir: runs/p0_lego_overfit_h5_masked_opaque_alpha
 backbone:
   checkpoint: null
   image_resolution: 160
@@ -33,4 +33,4 @@ train:
   validate_every: 5
   resample_episodes: false
   target_from_context: true
-  alpha_loss_weight: 0.0
+  alpha_loss_weight: 1.0

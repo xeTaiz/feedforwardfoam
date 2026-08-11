@@ -1,11 +1,11 @@
 # Run from external/powerfoam with this repository-relative config path.
-iterations: 200
+iterations: 2000
 densify_from: 1000
 densify_until: 0
 normal_weight: 0.1
 contribution_weight: 0.1
 interpenetration_weight: 1.0e-4
-experiment_name: lego_oracle_o0_5k_200
+experiment_name: lego_oracle_o0_5k_2000
 
 dataset: blender
 data_path: /code/feedforwardfoam-project/data/processed/nerf_synthetic
