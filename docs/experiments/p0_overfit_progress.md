@@ -50,6 +50,10 @@ All H-runs use one fixed Lego canonical view as both context and target, frozen 
 
 Use pixel-footprint radius initialization with a predicted bounded multiplicative scale. For the first P0 stage, do not predict unconstrained density: initialize/fix high density only on source-foreground cells (effectively opaque Beer–Lambert segments) and leave background cells empty. Do not use a full-strength global alpha L1 term; revisit a small foreground-only weight after held-out geometry is stable. H4 is a successful non-collapse same-view overfit signal, but its 20.7 dB plateau means it is not yet a near-perfect oracle fit and must not be presented as held-out NVS evidence.
 
+## Initialization identity audit
+
+The 20.7 dB plateau triggered a stricter renderer-contract audit. H4 was not an identity initialization: the head supplied `[0,1]` sigmoid RGB although upstream spherical-Voronoi values are centered and receive `+0.5`; it supplied positive physical radii although `PowerfoamScene.get_radii()` applies another `softplus(beta=100)`; density 100 is only finite Beer–Lambert attenuation; and the identity quaternion produces a world-`+X` dipole normal rather than a camera-facing normal. Therefore H4 cannot establish whether exact pixel-ray initialization reproduces the image. `scripts/check_same_view_identity.py` adds the required deterministic test, bypassing VGGT and the decoder: one cell on every exact renderer ray, centered source RGB, inverse-softplus physical radius, camera-facing normals, and effectively opaque density. Its CUDA result must be recorded before relying on the P0 initialization.
+
 ## Reporting contract
 
 For every run record: command/config, commit, steps, initial/final/best RGB loss and PSNR, alpha mean, gradient norm, mean radius, active cells, runtime/failure, and whether opacity collapsed. Do not interpret same-view metrics as NVS quality.
