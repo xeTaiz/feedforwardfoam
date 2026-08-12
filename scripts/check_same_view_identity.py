@@ -135,10 +135,12 @@ def main() -> None:
         initial_rgb = source_centered_rgb
     else:
         initial_rgb = torch.zeros_like(source_centered_rgb)
-    # P0 ties directional/site colors, so optimize one RGB triplet per cell and
-    # broadcast it through the full upstream tensor contract. The broadcast also
-    # sums gradients over the 64 tied values instead of diluting them.
-    rgb_parameter = torch.nn.Parameter(initial_rgb.clone())
+    rgb_parameter = torch.nn.Parameter(
+        initial_rgb[:, None, None, :]
+        .expand(count, num_texel_sites, sv_dof, 3)
+        .contiguous()
+        .clone()
+    )
     canonical_axes = torch.eye(3, device=device).repeat((sv_dof + 2) // 3, 1)[:sv_dof]
     axes = canonical_axes[None, None].expand(count, num_texel_sites, sv_dof, 3)
     flat_directions = directions.reshape(count, 3)
@@ -149,9 +151,7 @@ def main() -> None:
         density=torch.full((count,), args.density, device=device),
         texel_sites=torch.zeros(count, num_texel_sites, 2, device=device),
         texel_sv_axis=axes.reshape(count, num_texel_sites, 3 * sv_dof).contiguous(),
-        texel_sv_rgb=rgb_parameter[:, None, None, :]
-        .expand(count, num_texel_sites, sv_dof, 3)
-        .reshape(count, num_texel_sites, 3 * sv_dof),
+        texel_sv_rgb=rgb_parameter.reshape(count, num_texel_sites, 3 * sv_dof),
         texel_height=torch.zeros(count, num_texel_sites, device=device),
     )
     camera = camera_from_view(view, device)
@@ -190,8 +190,8 @@ def main() -> None:
         "optimize_color_steps": args.optimize_color_steps,
         "mse": mse,
         "psnr": -10.0 * math.log10(max(mse, 1e-30)),
-        "mae": float(error.abs().mean()),
-        "max_abs_error": float(error.abs().max()),
+        "mae": float(error.detach().abs().mean()),
+        "max_abs_error": float(error.detach().abs().max()),
         "mean_alpha": float(rendered_alpha.mean()),
         "min_alpha": float(rendered_alpha.min()),
         "mean_desired_physical_radius": float(physical_radii.mean()),
