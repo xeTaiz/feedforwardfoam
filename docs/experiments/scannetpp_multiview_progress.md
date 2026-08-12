@@ -1,6 +1,6 @@
 # ScanNet++ P0 multi-view supervision matrix
 
-Status: armed, pending staged-data transfer and CUDA smoke
+Status: running on four RTX A6000 GPUs
 
 ## Question
 
@@ -19,6 +19,7 @@ Given exactly one ScanNet++ source view, predict one complete Power Foam and sup
 - Validation: four deterministic episodes on the scene-disjoint validation scene every 250 steps.
 - Runs: 2,000 steps, seed 17, target counts 1/2/4/8.
 - Resume: atomic `latest.pt` stores head, optimizer, RNG, scene/view sampler state, history, and config.
+- Launch commit: `2c05152`; data subset 743 MB / 2,558 files on `KW60996`; four runs launched concurrently on GPUs 0–3.
 
 ## Configs
 
@@ -26,6 +27,15 @@ Given exactly one ScanNet++ source view, predict one complete Power Foam and sup
 - `configs/experiments/p0_scannetpp_mv2.yaml`
 - `configs/experiments/p0_scannetpp_mv4.yaml`
 - `configs/experiments/p0_scannetpp_mv8.yaml`
+
+## Launch record
+
+- MV1 PID 202596, GPU 0.
+- MV2 PID 202598, GPU 1.
+- MV4 PID 202600, GPU 2.
+- MV8 PID 202604, GPU 3.
+- Two-target and eight-target one-step CUDA smokes completed with finite gradients and deterministic validation metrics before launch.
+- At the first live check all four processes were healthy; approximate progress after two minutes was 310/180/90/40 steps for MV1/MV2/MV4/MV8 respectively.
 
 ## Interpretation limits
 
