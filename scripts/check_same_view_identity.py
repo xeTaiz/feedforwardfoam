@@ -90,6 +90,14 @@ def main() -> None:
     parser.add_argument("--depth", type=float, default=2.0)
     parser.add_argument("--radius-scale", type=float, default=0.8)
     parser.add_argument("--density", type=float, default=10_000.0)
+    parser.add_argument(
+        "--color-init",
+        choices=("source", "gray"),
+        default="source",
+        help="Initialize centered SV colors from the source or from renderer gray.",
+    )
+    parser.add_argument("--optimize-color-steps", type=int, default=0)
+    parser.add_argument("--learning-rate", type=float, default=0.05)
     parser.add_argument("--frame-index", type=int, default=0)
     parser.add_argument("--output-dir", type=Path, default=Path("runs/same_view_identity"))
     args = parser.parse_args()
@@ -97,6 +105,8 @@ def main() -> None:
         raise RuntimeError("This diagnostic requires a CUDA GPU")
     if args.depth <= 0 or args.radius_scale <= 0 or args.density <= 0:
         raise ValueError("depth, radius-scale, and density must be positive")
+    if args.optimize_color_steps < 0 or args.learning_rate <= 0:
+        raise ValueError("optimize-color-steps must be nonnegative and learning-rate positive")
 
     dataset = BlenderNvsDataset(
         args.data_root,
@@ -121,8 +131,15 @@ def main() -> None:
     num_texel_sites = 8
     sv_dof = 8
     source_centered_rgb = target.reshape(count, 3) - 0.5
-    rgb = source_centered_rgb[:, None, None, :].expand(
-        count, num_texel_sites, sv_dof, 3
+    if args.color_init == "source":
+        initial_rgb = source_centered_rgb
+    else:
+        initial_rgb = torch.zeros_like(source_centered_rgb)
+    rgb_parameter = torch.nn.Parameter(
+        initial_rgb[:, None, None, :]
+        .expand(count, num_texel_sites, sv_dof, 3)
+        .contiguous()
+        .clone()
     )
     canonical_axes = torch.eye(3, device=device).repeat((sv_dof + 2) // 3, 1)[:sv_dof]
     axes = canonical_axes[None, None].expand(count, num_texel_sites, sv_dof, 3)
@@ -134,7 +151,7 @@ def main() -> None:
         density=torch.full((count,), args.density, device=device),
         texel_sites=torch.zeros(count, num_texel_sites, 2, device=device),
         texel_sv_axis=axes.reshape(count, num_texel_sites, 3 * sv_dof).contiguous(),
-        texel_sv_rgb=rgb.reshape(count, num_texel_sites, 3 * sv_dof).contiguous(),
+        texel_sv_rgb=rgb_parameter.reshape(count, num_texel_sites, 3 * sv_dof),
         texel_height=torch.zeros(count, num_texel_sites, device=device),
     )
     camera = camera_from_view(view, device)
@@ -143,14 +160,34 @@ def main() -> None:
     )
     scene = bridge.build(parameters)
     effective_radii = scene.get_radii().detach()
+    trajectory = []
+    if args.optimize_color_steps:
+        optimizer = torch.optim.Adam([rgb_parameter], lr=args.learning_rate)
+        for step in range(1, args.optimize_color_steps + 1):
+            optimizer.zero_grad(set_to_none=True)
+            rendered_step = scene.forward(camera)[0]
+            loss = (rendered_step - target).square().mean()
+            loss.backward()
+            optimizer.step()
+            if step == 1 or step % 10 == 0 or step == args.optimize_color_steps:
+                step_mse = float(loss.detach())
+                record = {
+                    "step": step,
+                    "mse": step_mse,
+                    "psnr": -10.0 * math.log10(max(step_mse, 1e-30)),
+                }
+                trajectory.append(record)
+                print(json.dumps(record, sort_keys=True))
+
     result = scene.forward(camera)
     rendered, rendered_alpha = result[0], result[1]
-
     error = rendered - target
     error_sq = error.square()
     mse = float(error_sq.mean())
     metrics: dict[str, float | int] = {
         "cell_count": count,
+        "color_init": args.color_init,
+        "optimize_color_steps": args.optimize_color_steps,
         "mse": mse,
         "psnr": -10.0 * math.log10(max(mse, 1e-30)),
         "mae": float(error.abs().mean()),
@@ -178,6 +215,7 @@ def main() -> None:
     save_image(args.output_dir / "alpha.png", rendered_alpha[..., None].expand(-1, -1, 3))
     save_image(args.output_dir / "abs_error.png", error.abs())
     (args.output_dir / "metrics.json").write_text(json.dumps(metrics, indent=2) + "\n")
+    (args.output_dir / "trajectory.json").write_text(json.dumps(trajectory, indent=2) + "\n")
     print(json.dumps(metrics, sort_keys=True))
 
 
