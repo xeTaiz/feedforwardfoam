@@ -79,9 +79,18 @@ def train(
             spherical_voronoi_dof=int(head_cfg["spherical_voronoi_dof"]),
             radius_mode=str(head_cfg.get("radius_mode", "learned_absolute")),
             radius_scale_init=float(head_cfg.get("radius_scale_init", 1.5)),
+            radius_residual_log_scale=float(
+                head_cfg.get("radius_residual_log_scale", 0.25)
+            ),
             density_mode=str(head_cfg.get("density_mode", "learned")),
             fixed_density=float(head_cfg.get("fixed_density", 100.0)),
             initialize_rgb_from_image=bool(head_cfg.get("initialize_rgb_from_image", False)),
+            initialize_normals_from_depth=bool(
+                head_cfg.get("initialize_normals_from_depth", True)
+            ),
+            point_residual_scale=float(head_cfg.get("point_residual_scale", 0.05)),
+            normal_residual_radians=float(head_cfg.get("normal_residual_radians", 0.25)),
+            rgb_residual_scale=float(head_cfg.get("rgb_residual_scale", 0.5)),
         ).to(device)
     elif representation == "gaussian":
         head = CanonicalGaussianHead(

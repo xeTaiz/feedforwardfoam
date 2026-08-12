@@ -2,9 +2,75 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+import math
+
 import torch
 import torch.nn.functional as F
 from torch import nn
+
+
+def inverse_softplus(value: torch.Tensor, beta: float = 100.0) -> torch.Tensor:
+    """Convert a positive physical value to Power Foam's raw parameter domain."""
+    scaled = beta * value
+    return torch.where(
+        scaled > 20.0,
+        value,
+        torch.log(torch.expm1(scaled)) / beta,
+    )
+
+
+def quaternions_from_positive_x(normals: torch.Tensor) -> torch.Tensor:
+    """Return wxyz rotations mapping Power Foam's local +X normal to ``normals``."""
+    normal = F.normalize(normals, dim=-1, eps=1e-6)
+    quaternion = torch.stack(
+        [
+            1.0 + normal[..., 0],
+            torch.zeros_like(normal[..., 0]),
+            normal[..., 2],
+            -normal[..., 1],
+        ],
+        dim=-1,
+    )
+    opposite = normal[..., 0] < -1.0 + 1e-6
+    fallback = torch.zeros_like(quaternion)
+    fallback[..., 2] = 1.0
+    quaternion = torch.where(opposite[..., None], fallback, quaternion)
+    return F.normalize(quaternion, dim=-1, eps=1e-6)
+
+
+def quaternion_multiply(left: torch.Tensor, right: torch.Tensor) -> torch.Tensor:
+    """Compose wxyz quaternions, applying ``right`` before ``left``."""
+    lw, lx, ly, lz = left.unbind(dim=-1)
+    rw, rx, ry, rz = right.unbind(dim=-1)
+    return torch.stack(
+        [
+            lw * rw - lx * rx - ly * ry - lz * rz,
+            lw * rx + lx * rw + ly * rz - lz * ry,
+            lw * ry - lx * rz + ly * rw + lz * rx,
+            lw * rz + lx * ry - ly * rx + lz * rw,
+        ],
+        dim=-1,
+    )
+
+
+def depth_normals(points: torch.Tensor, ray_directions: torch.Tensor) -> torch.Tensor:
+    """Estimate camera-facing world normals from an H×W depth-lifted point map."""
+    dx = torch.empty_like(points)
+    dy = torch.empty_like(points)
+    dx[:, 1:-1] = points[:, 2:] - points[:, :-2]
+    dx[:, 0] = points[:, 1] - points[:, 0]
+    dx[:, -1] = points[:, -1] - points[:, -2]
+    dy[1:-1] = points[2:] - points[:-2]
+    dy[0] = points[1] - points[0]
+    dy[-1] = points[-1] - points[-2]
+    normals = torch.linalg.cross(dy, dx, dim=-1)
+    valid = torch.linalg.vector_norm(normals, dim=-1, keepdim=True) > 1e-8
+    normals = F.normalize(normals, dim=-1, eps=1e-6)
+    fallback = -ray_directions
+    normals = torch.where(valid, normals, fallback)
+    toward_camera = -ray_directions
+    flip = (normals * toward_camera).sum(dim=-1, keepdim=True) < 0
+    return F.normalize(torch.where(flip, -normals, normals), dim=-1, eps=1e-6)
 
 
 @dataclass(frozen=True)
@@ -51,9 +117,14 @@ class CanonicalPowerFoamHead(nn.Module):
         spherical_voronoi_dof: int = 8,
         radius_mode: str = "learned_absolute",
         radius_scale_init: float = 1.5,
+        radius_residual_log_scale: float = 0.25,
         density_mode: str = "learned",
         fixed_density: float = 100.0,
         initialize_rgb_from_image: bool = False,
+        initialize_normals_from_depth: bool = True,
+        point_residual_scale: float = 0.05,
+        normal_residual_radians: float = 0.25,
+        rgb_residual_scale: float = 0.5,
     ) -> None:
         super().__init__()
         if radius_mode not in {"learned_absolute", "pixel_footprint"}:
@@ -65,9 +136,14 @@ class CanonicalPowerFoamHead(nn.Module):
         self.spherical_voronoi_dof = spherical_voronoi_dof
         self.radius_mode = radius_mode
         self.radius_scale_init = radius_scale_init
+        self.radius_residual_log_scale = radius_residual_log_scale
         self.density_mode = density_mode
         self.fixed_density = fixed_density
         self.initialize_rgb_from_image = initialize_rgb_from_image
+        self.initialize_normals_from_depth = initialize_normals_from_depth
+        self.point_residual_scale = point_residual_scale
+        self.normal_residual_radians = normal_residual_radians
+        self.rgb_residual_scale = rgb_residual_scale
         self.local = nn.Sequential(
             nn.Conv2d(5, hidden_dim, 3, padding=1),
             nn.GELU(),
@@ -92,12 +168,11 @@ class CanonicalPowerFoamHead(nn.Module):
             output.weight[:9].zero_()
             output.weight[10:].zero_()
             output.bias.zero_()
-            # learned_absolute: 0.05 + softplus(raw, beta=10) ≈ 0.09.
-            # pixel_footprint: raw zero gives exactly radius_scale_init.
-            output.bias[3] = -0.0709 if self.radius_mode == "learned_absolute" else 0.0
-            output.bias[4] = 1.0  # identity quaternion (wxyz)
-            # Power Foam applies softplus(raw, beta=100): positive density avoids
-            # a zero-alpha / zero-gradient initialization.
+            # Geometry and appearance rows are residuals around the physical
+            # depth/ray/footprint/source-RGB initialization.
+            output.bias[3] = 0.0
+            output.bias[4] = 1.0  # identity residual quaternion (wxyz)
+            # Density is already in Power Foam's raw softplus domain.
             output.bias[8] = 0.1
 
     @staticmethod
@@ -154,28 +229,55 @@ class CanonicalPowerFoamHead(nn.Module):
                 align_corners=False,
             )[0].permute(1, 2, 0).reshape(-1, 6)
         rays = ray_map[selected]
-        depth_selected = depth[0, 0].reshape(-1)[selected].clamp_min(1e-3)
+        depth = depth.clamp_min(1e-3)
 
-        point_residual = 0.05 * torch.tanh(values[:, :3])
-        points = rays[:, :3] + (depth_selected[:, None] + point_residual[:, :1]) * rays[:, 3:]
+        ray_directions = ray_map[:, 3:].reshape(h, w, 3)
+        base_points = ray_map[:, :3].reshape(h, w, 3) + depth[0, 0, ..., None] * ray_directions
+        base_points_selected = base_points.reshape(-1, 3)[selected]
+        point_residual = self.point_residual_scale * torch.tanh(values[:, :3])
+        points = base_points_selected + point_residual
         if self.radius_mode == "pixel_footprint":
-            ray_directions = ray_map[:, 3:].reshape(h, w, 3)
             dx = torch.linalg.vector_norm(ray_directions[:, 1:] - ray_directions[:, :-1], dim=-1)
             dy = torch.linalg.vector_norm(ray_directions[1:] - ray_directions[:-1], dim=-1)
             footprint = torch.zeros(h, w, device=values.device, dtype=values.dtype)
+            counts = torch.zeros_like(footprint)
             footprint[:, :-1] += dx
             footprint[:, 1:] += dx
+            counts[:, :-1] += 1
+            counts[:, 1:] += 1
             footprint[:-1] += dy
             footprint[1:] += dy
-            counts = torch.full_like(footprint, 4.0)
-            counts[:, (0, -1)] -= 1
-            counts[(0, -1), :] -= 1
-            footprint = depth[0, 0] * footprint / counts
-            scale = self.radius_scale_init * torch.exp(0.25 * torch.tanh(values[:, 3]))
-            radii = footprint.reshape(-1)[selected].clamp_min(1e-4) * scale
+            counts[:-1] += 1
+            counts[1:] += 1
+            footprint = depth[0, 0] * footprint / counts.clamp_min(1)
+            scale = self.radius_scale_init * torch.exp(
+                self.radius_residual_log_scale * torch.tanh(values[:, 3])
+            )
+            physical_radii = footprint.reshape(-1)[selected].clamp_min(1e-4) * scale
         else:
-            radii = 0.05 + F.softplus(values[:, 3], beta=10)
-        quaternion = F.normalize(values[:, 4:8], dim=-1, eps=1e-6)
+            physical_radii = 0.05 * torch.exp(0.5 * torch.tanh(values[:, 3]))
+        radii = inverse_softplus(physical_radii)
+
+        if self.initialize_normals_from_depth:
+            base_normals = depth_normals(base_points, ray_directions).reshape(-1, 3)[selected]
+        else:
+            base_normals = -rays[:, 3:]
+        base_quaternion = quaternions_from_positive_x(base_normals)
+        # Bounded residual quaternion with a nonzero first derivative at the
+        # identity; axis-angle normalization at a zero vector would be dead.
+        residual_xyz = (
+            math.tan(0.5 * self.normal_residual_radians)
+            / math.sqrt(3.0)
+            * torch.tanh(values[:, 5:8])
+        )
+        residual_quaternion = F.normalize(
+            torch.cat([torch.ones_like(values[:, 4:5]), residual_xyz], dim=-1),
+            dim=-1,
+            eps=1e-6,
+        )
+        quaternion = F.normalize(
+            quaternion_multiply(residual_quaternion, base_quaternion), dim=-1, eps=1e-6
+        )
         if self.density_mode == "fixed":
             density = torch.full_like(values[:, 8], self.fixed_density)
         elif self.density_mode == "source_alpha_fixed":
@@ -204,11 +306,12 @@ class CanonicalPowerFoamHead(nn.Module):
         rgb_logits = values[:, cursor : cursor + count].reshape(
             m, self.num_texel_sites, self.spherical_voronoi_dof, 3
         )
+        rgb_residual = self.rgb_residual_scale * torch.tanh(rgb_logits)
         if self.initialize_rgb_from_image:
             source_rgb = image[0].permute(1, 2, 0).reshape(-1, 3)[selected]
-            source_logits = torch.logit(source_rgb.clamp(1e-4, 1 - 1e-4))
-            rgb_logits = rgb_logits + source_logits[:, None, None]
-        rgb = torch.sigmoid(rgb_logits)
+            rgb = source_rgb[:, None, None] - 0.5 + rgb_residual
+        else:
+            rgb = rgb_residual
 
         # Keep full upstream shapes. P0 constrains, rather than removes, 2D
         # surface texture: all sites are tied at the dipole and height is zero.

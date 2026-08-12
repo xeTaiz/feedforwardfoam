@@ -43,8 +43,8 @@ def quaternions_from_positive_x(normals: torch.Tensor) -> torch.Tensor:
         [
             1.0 + normal[:, 0],
             torch.zeros_like(normal[:, 0]),
-            -normal[:, 2],
-            normal[:, 1],
+            normal[:, 2],
+            -normal[:, 1],
         ],
         dim=-1,
     )

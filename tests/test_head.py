@@ -1,6 +1,10 @@
 import torch
 
-from feedforwardfoam.head import CanonicalPowerFoamHead
+from feedforwardfoam.head import (
+    CanonicalPowerFoamHead,
+    depth_normals,
+    inverse_softplus,
+)
 
 
 def test_canonical_head_produces_full_powerfoam_tensors_and_gradients():
@@ -26,7 +30,8 @@ def test_canonical_head_produces_full_powerfoam_tensors_and_gradients():
     # Decoder initialization must produce nonzero Power Foam density; an empty
     # volume has no photometric gradient in the initial P0 smoke experiment.
     assert torch.all(params.density > 0)
-    assert torch.allclose(params.radii.mean(), torch.tensor(0.09), atol=1e-3)
+    effective_radii = torch.nn.functional.softplus(params.radii, beta=100)
+    assert torch.allclose(effective_radii.mean(), torch.tensor(0.05), atol=1e-4)
 
     loss = sum(value.square().mean() for value in params.as_upstream_tensors().values())
     loss.backward()
@@ -57,9 +62,81 @@ def test_geometry_aware_head_uses_pixel_footprint_and_fixed_density():
     rays[..., 3:] = torch.nn.functional.normalize(rays[..., 3:], dim=-1)
 
     params = head(images, features, rays)
-    assert torch.all(params.radii > 0)
+    effective_radii = torch.nn.functional.softplus(params.radii, beta=100)
+    assert torch.all(effective_radii > 0)
     assert torch.allclose(params.density, torch.full_like(params.density, 50.0))
-    assert torch.allclose(params.texel_sv_rgb.mean(), torch.tensor(0.25), atol=1e-3)
+    # Upstream spherical Voronoi adds 0.5, so source 0.25 is encoded as -0.25.
+    assert torch.allclose(params.texel_sv_rgb.mean(), torch.tensor(-0.25), atol=1e-3)
+
+
+def test_raw_radius_round_trip_and_depth_normals_face_camera():
+    physical = torch.tensor([1e-4, 0.005, 0.05, 1.0])
+    raw = inverse_softplus(physical)
+    assert torch.allclose(torch.nn.functional.softplus(raw, beta=100), physical, atol=1e-6)
+
+    ray_directions = torch.zeros(3, 4, 3)
+    ray_directions[..., 2] = 1
+    x = torch.linspace(-0.2, 0.2, 4)[None].expand(3, -1)
+    y = torch.linspace(-0.1, 0.1, 3)[:, None].expand(-1, 4)
+    points = torch.stack([x, y, torch.ones_like(x)], dim=-1)
+    normals = depth_normals(points, ray_directions)
+    assert torch.all((normals * -ray_directions).sum(dim=-1) > 0.99)
+
+
+def test_zero_residual_head_uses_camera_facing_base_geometry_and_centered_rgb():
+    head = CanonicalPowerFoamHead(
+        register_dim=8,
+        hidden_dim=16,
+        max_cells=12,
+        radius_mode="pixel_footprint",
+        radius_scale_init=0.8,
+        radius_residual_log_scale=0.0,
+        density_mode="fixed",
+        fixed_density=10_000.0,
+        initialize_rgb_from_image=True,
+        initialize_normals_from_depth=False,
+        point_residual_scale=0.0,
+        normal_residual_radians=0.0,
+        rgb_residual_scale=0.0,
+    )
+    images = torch.rand(1, 1, 3, 3, 4)
+    features = {
+        "depth": torch.full((1, 1, 1, 3, 4), 2.0),
+        "depth_conf": torch.ones(1, 1, 1, 3, 4),
+        "registers": torch.zeros(1, 1, 2, 8),
+    }
+    rays = torch.zeros(3, 4, 6)
+    rays[..., 3] = torch.linspace(-0.2, 0.2, 4)[None]
+    rays[..., 4] = torch.linspace(0.15, -0.15, 3)[:, None]
+    rays[..., 5] = 1.0
+    rays[..., 3:] = torch.nn.functional.normalize(rays[..., 3:], dim=-1)
+
+    params = head(images, features, rays)
+    expected_points = 2.0 * rays[..., 3:].reshape(-1, 3)
+    distances = torch.cdist(params.points.detach(), expected_points)
+    matched = distances.argmin(dim=1)
+    assert torch.all(distances[torch.arange(12), matched] < 1e-6)
+    normals = torch.stack(
+        [
+            1 - 2 * (params.quaternions[:, 2].square() + params.quaternions[:, 3].square()),
+            2
+            * (
+                params.quaternions[:, 1] * params.quaternions[:, 2]
+                - params.quaternions[:, 3] * params.quaternions[:, 0]
+            ),
+            2
+            * (
+                params.quaternions[:, 1] * params.quaternions[:, 3]
+                + params.quaternions[:, 2] * params.quaternions[:, 0]
+            ),
+        ],
+        dim=-1,
+    )
+    expected_directions = rays[..., 3:].reshape(-1, 3)[matched]
+    assert torch.allclose(normals, -expected_directions, atol=1e-5)
+    expected_rgb = images[0, 0].permute(1, 2, 0).reshape(-1, 3)[matched] - 0.5
+    actual_rgb = params.texel_sv_rgb.reshape(12, 8, 8, 3)
+    assert torch.allclose(actual_rgb[:, 0, 0], expected_rgb, atol=1e-6)
 
 
 def test_source_alpha_fixed_density_makes_background_cells_empty():
