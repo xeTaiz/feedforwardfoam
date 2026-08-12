@@ -13,6 +13,7 @@ data/manifests/*
 !data/raw/.gitkeep
 !data/processed/.gitkeep
 !data/manifests/.gitkeep
+!data/manifests/*.json
 runs/
 checkpoints/
 *.pt
