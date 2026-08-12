@@ -14,7 +14,7 @@ head:
   radius_scale_init: 0.8
   radius_residual_log_scale: 0.25
   density_mode: fixed
-  fixed_density: 10000.0
+  fixed_density: 1000000.0
   initialize_rgb_from_image: true
   initialize_normals_from_depth: true
   point_residual_scale: 0.01

@@ -34,6 +34,14 @@ def _charbonnier(prediction: torch.Tensor, target: torch.Tensor, eps: float = 1e
     return torch.sqrt((prediction - target).square() + eps * eps).mean()
 
 
+def _rgb_loss(prediction: torch.Tensor, target: torch.Tensor, name: str) -> torch.Tensor:
+    if name == "charbonnier":
+        return _charbonnier(prediction, target)
+    if name == "mse":
+        return F.mse_loss(prediction, target)
+    raise ValueError(f"Unknown RGB loss: {name}")
+
+
 def _validate(rendered: torch.Tensor, target: torch.Tensor) -> dict[str, float]:
     mse = F.mse_loss(rendered.clamp(0, 1), target).item()
     return {"mse": mse, "psnr": -10.0 * torch.log10(torch.tensor(mse + 1e-10)).item()}
@@ -157,7 +165,7 @@ def train(
         else:
             render_output = bridge.render(params, target_view)
         rendered = render_output.rgb
-        rgb_loss = _charbonnier(rendered, target)
+        rgb_loss = _rgb_loss(rendered, target, str(config["train"].get("rgb_loss", "charbonnier")))
         alpha_loss = torch.zeros((), device=device)
         alpha_weight = float(config["train"].get("alpha_loss_weight", 0.0))
         if alpha_weight > 0:
@@ -180,7 +188,9 @@ def train(
             "render_rgb_mean": float(rendered.detach().mean()),
             "render_alpha_mean": float(render_output.alpha.detach().mean()),
             "mean_radius": float(
-                params.radii.detach().mean() if representation == "foam" else params.scales.detach().mean()
+                F.softplus(params.radii.detach(), beta=100).mean()
+                if representation == "foam"
+                else params.scales.detach().mean()
             ),
         }
         if step % int(config["train"]["validate_every"]) == 0:

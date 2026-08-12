@@ -14,7 +14,7 @@ head:
   radius_scale_init: 0.8
   radius_residual_log_scale: 0.0
   density_mode: fixed
-  fixed_density: 10000.0
+  fixed_density: 1000000.0
   initialize_rgb_from_image: false
   initialize_normals_from_depth: false
   point_residual_scale: 0.0
@@ -30,10 +30,10 @@ data:
   min_overlap: 0.7
   image_downsample: 5
 train:
-  steps: 300
+  steps: 500
   batch_size: 1
-  learning_rate: 0.001
-  rgb_loss: charbonnier
+  learning_rate: 0.00001
+  rgb_loss: mse
   log_every: 5
   validate_every: 5
   resample_episodes: false
