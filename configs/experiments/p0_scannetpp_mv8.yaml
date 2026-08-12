@@ -32,7 +32,7 @@ data:
   target_pool_size: 32
   image_downsample: 1
 train:
-  steps: 2000
+  steps: 1000
   learning_rate: 0.0001
   weight_decay: 0.0
   rgb_loss: charbonnier
