@@ -122,6 +122,8 @@ class CanonicalPowerFoamHead(nn.Module):
         fixed_density: float = 100.0,
         initialize_rgb_from_image: bool = False,
         initialize_normals_from_depth: bool = True,
+        base_depth_mode: str = "predicted",
+        constant_base_depth: float = 2.0,
         point_residual_scale: float = 0.05,
         normal_residual_radians: float = 0.25,
         rgb_residual_scale: float = 0.5,
@@ -131,6 +133,8 @@ class CanonicalPowerFoamHead(nn.Module):
             raise ValueError(f"Unknown radius mode: {radius_mode}")
         if density_mode not in {"learned", "fixed", "source_alpha_fixed"}:
             raise ValueError(f"Unknown density mode: {density_mode}")
+        if base_depth_mode not in {"predicted", "constant"}:
+            raise ValueError(f"Unknown base depth mode: {base_depth_mode}")
         self.max_cells = max_cells
         self.num_texel_sites = num_texel_sites
         self.spherical_voronoi_dof = spherical_voronoi_dof
@@ -141,6 +145,8 @@ class CanonicalPowerFoamHead(nn.Module):
         self.fixed_density = fixed_density
         self.initialize_rgb_from_image = initialize_rgb_from_image
         self.initialize_normals_from_depth = initialize_normals_from_depth
+        self.base_depth_mode = base_depth_mode
+        self.constant_base_depth = constant_base_depth
         self.point_residual_scale = point_residual_scale
         self.normal_residual_radians = normal_residual_radians
         self.rgb_residual_scale = rgb_residual_scale
@@ -230,6 +236,8 @@ class CanonicalPowerFoamHead(nn.Module):
             )[0].permute(1, 2, 0).reshape(-1, 6)
         rays = ray_map[selected]
         depth = depth.clamp_min(1e-3)
+        if self.base_depth_mode == "constant":
+            depth = torch.full_like(depth, self.constant_base_depth)
 
         ray_directions = ray_map[:, 3:].reshape(h, w, 3)
         base_points = ray_map[:, :3].reshape(h, w, 3) + depth[0, 0, ..., None] * ray_directions

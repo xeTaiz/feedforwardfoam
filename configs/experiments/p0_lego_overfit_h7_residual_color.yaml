@@ -17,6 +17,8 @@ head:
   fixed_density: 1000000.0
   initialize_rgb_from_image: false
   initialize_normals_from_depth: false
+  base_depth_mode: constant
+  constant_base_depth: 2.0
   point_residual_scale: 0.0
   normal_residual_radians: 0.0
   rgb_residual_scale: 0.5

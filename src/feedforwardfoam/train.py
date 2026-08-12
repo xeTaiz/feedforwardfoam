@@ -96,6 +96,8 @@ def train(
             initialize_normals_from_depth=bool(
                 head_cfg.get("initialize_normals_from_depth", True)
             ),
+            base_depth_mode=str(head_cfg.get("base_depth_mode", "predicted")),
+            constant_base_depth=float(head_cfg.get("constant_base_depth", 2.0)),
             point_residual_scale=float(head_cfg.get("point_residual_scale", 0.05)),
             normal_residual_radians=float(head_cfg.get("normal_residual_radians", 0.25)),
             rgb_residual_scale=float(head_cfg.get("rgb_residual_scale", 0.5)),
