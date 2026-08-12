@@ -34,7 +34,7 @@ data:
 train:
   steps: 1
   batch_size: 1
-  learning_rate: 0.0001
+  learning_rate: 0.0
   rgb_loss: charbonnier
   log_every: 1
   validate_every: 1

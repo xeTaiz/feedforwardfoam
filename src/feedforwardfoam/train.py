@@ -110,7 +110,11 @@ def train(
         ).to(device)
     else:
         raise ValueError(f"Unknown representation: {representation}")
-    optimizer = torch.optim.AdamW(head.parameters(), lr=float(config["train"]["learning_rate"]))
+    optimizer = torch.optim.AdamW(
+        head.parameters(),
+        lr=float(config["train"]["learning_rate"]),
+        weight_decay=float(config["train"].get("weight_decay", 0.01)),
+    )
     output_dir = Path(config["output_dir"])
     output_dir.mkdir(parents=True, exist_ok=True)
     (output_dir / "config.yaml").write_text(yaml.safe_dump(config, sort_keys=True))
@@ -176,9 +180,12 @@ def train(
             alpha_loss = F.l1_loss(render_output.alpha, target_view.alpha.to(device))
         loss = rgb_loss + alpha_weight * alpha_loss
         optimizer.zero_grad(set_to_none=True)
-        loss.backward()
-        grad_norm = torch.nn.utils.clip_grad_norm_(head.parameters(), 1.0)
-        optimizer.step()
+        if loss.requires_grad:
+            loss.backward()
+            grad_norm = torch.nn.utils.clip_grad_norm_(head.parameters(), 1.0)
+            optimizer.step()
+        else:
+            grad_norm = torch.zeros((), device=device)
 
         record = {
             "step": float(step),
