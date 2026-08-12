@@ -1,5 +1,5 @@
 seed: 7
-output_dir: runs/p0_lego_overfit_h7_residual_color
+output_dir: runs/p0_lego_overfit_h9_radius_1p0
 backbone:
   checkpoint: null
   image_resolution: 160
@@ -11,17 +11,15 @@ head:
   spherical_voronoi_dof: 8
   hidden_dim: 256
   radius_mode: pixel_footprint
-  radius_scale_init: 0.8
+  radius_scale_init: 1.0
   radius_residual_log_scale: 0.0
   density_mode: fixed
   fixed_density: 1000000.0
-  initialize_rgb_from_image: false
-  initialize_normals_from_depth: false
-  base_depth_mode: constant
-  constant_base_depth: 2.0
+  initialize_rgb_from_image: true
+  initialize_normals_from_depth: true
   point_residual_scale: 0.0
   normal_residual_radians: 0.0
-  rgb_residual_scale: 1.0
+  rgb_residual_scale: 0.0
 renderer:
   render_objective: volume
   is_pinhole: true
@@ -32,10 +30,10 @@ data:
   min_overlap: 0.7
   image_downsample: 5
 train:
-  steps: 1000
+  steps: 1
   batch_size: 1
   learning_rate: 0.0001
-  rgb_loss: mse
+  rgb_loss: charbonnier
   log_every: 5
   validate_every: 5
   resample_episodes: false
