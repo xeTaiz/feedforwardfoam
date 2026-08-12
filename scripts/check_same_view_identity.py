@@ -135,12 +135,10 @@ def main() -> None:
         initial_rgb = source_centered_rgb
     else:
         initial_rgb = torch.zeros_like(source_centered_rgb)
-    rgb_parameter = torch.nn.Parameter(
-        initial_rgb[:, None, None, :]
-        .expand(count, num_texel_sites, sv_dof, 3)
-        .contiguous()
-        .clone()
-    )
+    # P0 ties directional/site colors, so optimize one RGB triplet per cell and
+    # broadcast it through the full upstream tensor contract. The broadcast also
+    # sums gradients over the 64 tied values instead of diluting them.
+    rgb_parameter = torch.nn.Parameter(initial_rgb.clone())
     canonical_axes = torch.eye(3, device=device).repeat((sv_dof + 2) // 3, 1)[:sv_dof]
     axes = canonical_axes[None, None].expand(count, num_texel_sites, sv_dof, 3)
     flat_directions = directions.reshape(count, 3)
@@ -151,7 +149,9 @@ def main() -> None:
         density=torch.full((count,), args.density, device=device),
         texel_sites=torch.zeros(count, num_texel_sites, 2, device=device),
         texel_sv_axis=axes.reshape(count, num_texel_sites, 3 * sv_dof).contiguous(),
-        texel_sv_rgb=rgb_parameter.reshape(count, num_texel_sites, 3 * sv_dof),
+        texel_sv_rgb=rgb_parameter[:, None, None, :]
+        .expand(count, num_texel_sites, sv_dof, 3)
+        .reshape(count, num_texel_sites, 3 * sv_dof),
         texel_height=torch.zeros(count, num_texel_sites, device=device),
     )
     camera = camera_from_view(view, device)
@@ -162,7 +162,7 @@ def main() -> None:
     effective_radii = scene.get_radii().detach()
     trajectory = []
     if args.optimize_color_steps:
-        optimizer = torch.optim.Adam([rgb_parameter], lr=args.learning_rate)
+        optimizer = torch.optim.Adam([rgb_parameter], lr=args.learning_rate, eps=1e-12)
         for step in range(1, args.optimize_color_steps + 1):
             optimizer.zero_grad(set_to_none=True)
             rendered_step = scene.forward(camera)[0]
@@ -183,7 +183,7 @@ def main() -> None:
     rendered, rendered_alpha = result[0], result[1]
     error = rendered - target
     error_sq = error.square()
-    mse = float(error_sq.mean())
+    mse = float(error_sq.detach().mean())
     metrics: dict[str, float | int] = {
         "cell_count": count,
         "color_init": args.color_init,
