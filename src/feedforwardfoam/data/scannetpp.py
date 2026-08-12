@@ -1,15 +1,9 @@
-"""ScanNet++ manifest loader.
-
-Raw ScanNet++ releases have several camera/image products.  The research harness
-uses an explicit, versioned manifest after a scene has been pose-audited, rather
-than silently guessing among them.  A manifest contains `train`/`test` lists of
-views, each with a scene-relative image path, a 4x4 camera-to-world matrix, and
-horizontal FoV in radians.
-"""
+"""Audited ScanNet++ DSLR loader for one-source/held-out-view NVS."""
 from __future__ import annotations
 
 import argparse
 import json
+import math
 from pathlib import Path
 
 import torch
@@ -21,7 +15,16 @@ from .types import NvsEpisode, View
 
 
 class ScanNetPPDataset(Dataset[NvsEpisode]):
-    """Scene-disjoint NVS episodes from an audited ScanNet++ view manifest."""
+    """Sample disjoint NVS episodes from one ScanNet++ scene.
+
+    Two layouts are accepted:
+
+    1. ``fffoam_views.json`` with explicit ``train``/``test`` frame lists.
+    2. Native ScanNet++ DSLR data with
+       ``dslr/nerfstudio/transforms_undistorted.json``. Only centered,
+       undistorted ``PINHOLE`` cameras are accepted. Images are center-cropped
+       to a square before resizing, preserving a valid centered pinhole model.
+    """
 
     def __init__(
         self,
@@ -31,64 +34,142 @@ class ScanNetPPDataset(Dataset[NvsEpisode]):
         context_views: int,
         target_views: int,
         image_downsample: int = 1,
+        image_resolution: int | None = None,
         seed: int = 0,
     ) -> None:
         self.scene_root = Path(scene_root)
-        manifest_path = self.scene_root / "fffoam_views.json"
-        if not manifest_path.exists():
-            raise FileNotFoundError(
-                f"{manifest_path} is required. Create it only after choosing a static "
-                "DSLR sequence and validating COLMAP poses."
-            )
-        self.manifest = json.loads(manifest_path.read_text())
-        self.frames = self.manifest[split]
         self.context_views = context_views
         self.target_views = target_views
         self.image_downsample = image_downsample
+        self.image_resolution = image_resolution
         self.generator = torch.Generator().manual_seed(seed)
+        manifest_path = self.scene_root / "fffoam_views.json"
+        if manifest_path.exists():
+            self.manifest = json.loads(manifest_path.read_text())
+            self.frames = self.manifest[split]
+            self.native = False
+            self.scene_id = str(self.manifest.get("scene_id", self.scene_root.name))
+            self.camera = None
+        else:
+            self.native = True
+            self.scene_id = self.scene_root.name
+            transforms_path = (
+                self.scene_root / "dslr" / "nerfstudio" / "transforms_undistorted.json"
+            )
+            if not transforms_path.exists():
+                raise FileNotFoundError(
+                    f"Expected {manifest_path} or native metadata at {transforms_path}"
+                )
+            transforms = json.loads(transforms_path.read_text())
+            self.camera = transforms
+            self._validate_native_camera(transforms)
+            if split == "train":
+                self.frames = [frame for frame in transforms["frames"] if not frame.get("is_bad")]
+            elif split in {"test", "val"}:
+                self.frames = [
+                    frame for frame in transforms.get("test_frames", []) if not frame.get("is_bad")
+                ]
+            else:
+                raise ValueError(f"Unknown ScanNet++ split: {split}")
         if len(self.frames) < context_views + target_views:
-            raise ValueError("Not enough audited views for one held-out NVS episode")
+            raise ValueError(
+                f"{self.scene_id}/{split} has {len(self.frames)} views, fewer than "
+                f"{context_views + target_views} required"
+            )
+
+    @staticmethod
+    def _validate_native_camera(camera: dict) -> None:
+        if camera.get("camera_model") != "PINHOLE":
+            raise ValueError("ScanNet++ experiment requires undistorted PINHOLE imagery")
+        width, height = int(camera["w"]), int(camera["h"])
+        if abs(float(camera["cx"]) - width / 2) > 1e-3:
+            raise ValueError("ScanNet++ principal point must be centered in x")
+        if abs(float(camera["cy"]) - height / 2) > 1e-3:
+            raise ValueError("ScanNet++ principal point must be centered in y")
+        if abs(float(camera["fl_x"]) - float(camera["fl_y"])) / float(camera["fl_x"]) > 0.01:
+            raise ValueError("ScanNet++ experiment assumes approximately square pixels")
 
     def __len__(self) -> int:
         return len(self.frames)
 
+    def _native_image_path(self, frame: dict) -> Path:
+        filename = Path(frame["file_path"]).name
+        return self.scene_root / "dslr" / "resized_undistorted_images" / filename
+
     def _load_view(self, frame: dict) -> View:
-        image_path = self.scene_root / frame["image"]
-        rgb = torch.from_numpy(__import__("numpy").asarray(Image.open(image_path).convert("RGB")).copy())
+        if self.native:
+            assert self.camera is not None
+            image_path = self._native_image_path(frame)
+            source_width = int(self.camera["w"])
+            source_height = int(self.camera["h"])
+            crop_size = min(source_width, source_height)
+            fov_x = 2.0 * math.atan(0.5 * crop_size / float(self.camera["fl_x"]))
+            rgb = torch.from_numpy(
+                __import__("numpy").asarray(Image.open(image_path).convert("RGB")).copy()
+            )
+            top = (rgb.shape[0] - crop_size) // 2
+            left = (rgb.shape[1] - crop_size) // 2
+            rgb = rgb[top : top + crop_size, left : left + crop_size]
+            c2w = frame["transform_matrix"]
+            name = str(image_path.relative_to(self.scene_root))
+        else:
+            image_path = self.scene_root / frame["image"]
+            rgb = torch.from_numpy(
+                __import__("numpy").asarray(Image.open(image_path).convert("RGB")).copy()
+            )
+            fov_x = float(frame["fov_x_radians"])
+            c2w = frame["c2w"]
+            name = frame["image"]
         rgb = rgb.float() / 255.0
-        if self.image_downsample > 1:
-            h, w = rgb.shape[:2]
+        if self.image_resolution is not None:
             rgb = F.interpolate(
                 rgb.permute(2, 0, 1)[None],
-                size=(h // self.image_downsample, w // self.image_downsample),
+                size=(self.image_resolution, self.image_resolution),
+                mode="area",
+            )[0].permute(1, 2, 0)
+        elif self.image_downsample > 1:
+            height, width = rgb.shape[:2]
+            rgb = F.interpolate(
+                rgb.permute(2, 0, 1)[None],
+                size=(height // self.image_downsample, width // self.image_downsample),
                 mode="area",
             )[0].permute(1, 2, 0)
         return View(
             image=rgb,
-            c2w=torch.tensor(frame["c2w"], dtype=torch.float32),
-            fov_x_radians=float(frame["fov_x_radians"]),
-            name=frame["image"],
+            c2w=torch.tensor(c2w, dtype=torch.float32),
+            fov_x_radians=fov_x,
+            name=name,
+        )
+
+    def sample_episode(self) -> NvsEpisode:
+        indices = torch.randperm(len(self.frames), generator=self.generator).tolist()
+        return self.episode_from_indices(indices[: self.context_views + self.target_views])
+
+    def episode_from_indices(self, indices: list[int]) -> NvsEpisode:
+        if len(indices) != self.context_views + self.target_views:
+            raise ValueError("Episode index count does not match context plus target views")
+        return NvsEpisode(
+            context=tuple(self._load_view(self.frames[i]) for i in indices[: self.context_views]),
+            target=tuple(self._load_view(self.frames[i]) for i in indices[self.context_views :]),
+            scene_id=self.scene_id,
         )
 
     def __getitem__(self, _: int) -> NvsEpisode:
-        indices = torch.randperm(len(self.frames), generator=self.generator).tolist()
-        return NvsEpisode(
-            context=tuple(self._load_view(self.frames[i]) for i in indices[: self.context_views]),
-            target=tuple(
-                self._load_view(self.frames[i])
-                for i in indices[self.context_views : self.context_views + self.target_views]
-            ),
-            scene_id=str(self.manifest.get("scene_id", self.scene_root.name)),
-        )
+        return self.sample_episode()
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Validate an FF-Foam ScanNet++ scene manifest")
+    parser = argparse.ArgumentParser(description="Validate an FF-Foam ScanNet++ scene")
     parser.add_argument("scene_root", type=Path)
     parser.add_argument("--split", default="train")
+    parser.add_argument("--target-views", type=int, default=1)
     args = parser.parse_args()
     dataset = ScanNetPPDataset(
-        args.scene_root, split=args.split, context_views=1, target_views=1
+        args.scene_root,
+        split=args.split,
+        context_views=1,
+        target_views=args.target_views,
+        image_resolution=160,
     )
     episode = dataset[0]
     print(f"Validated {episode.scene_id}: {len(dataset.frames)} {args.split} views")

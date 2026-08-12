@@ -36,3 +36,17 @@ data/processed/scannetpp/<scene>/
 ```
 
 Audit the pose reprojection, static mask, resolution, and exposure before producing this manifest. The input pose uses camera-to-world matrices in the same normalised coordinate system used by the experiment.
+
+### Native audited DSLR layout
+
+The loader also accepts ScanNet++'s released undistorted DSLR product directly:
+
+```text
+<root>/<scene>/dslr/
+  nerfstudio/transforms_undistorted.json
+  resized_undistorted_images/*.JPG
+```
+
+It hard-rejects anything except centered `PINHOLE` calibration with approximately square pixels. The released 1752×1168 images are center-cropped to 1168×1168 and then resized, with the corresponding horizontal FoV recomputed from `fl_x`. This avoids pretending that arbitrary principal points or distorted images fit the project's current `View.fov_x_radians` camera contract.
+
+The first multi-scene P0 manifest is `data/manifests/scannetpp_p0_4scene.json`: three train scenes and one scene-disjoint validation scene. `scripts/prepare_scannetpp_subset.py` copies only the required DSLR metadata and undistorted images into an experiment staging root.
