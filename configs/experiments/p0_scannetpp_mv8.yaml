@@ -2,10 +2,10 @@ seed: 17
 output_dir: runs/scannetpp_p0_mv8
 backbone:
   checkpoint: null
-  image_resolution: 160
+  image_resolution: 80
   allow_stub_backbone: false
 head:
-  max_cells: 25600
+  max_cells: 6400
   num_texel_sites: 8
   spherical_voronoi_dof: 8
   hidden_dim: 256
@@ -29,16 +29,17 @@ data:
   scene_manifest: data/manifests/scannetpp_p0_4scene.json
   context_views: 1
   target_views: 8
+  target_pool_size: 32
   image_downsample: 1
 train:
-  steps: 5000
+  steps: 2000
   learning_rate: 0.0001
   weight_decay: 0.0
   rgb_loss: charbonnier
   alpha_loss_weight: 0.0
   log_every: 10
-  validate_every: 250
-  checkpoint_every: 250
+  validate_every: 200
+  checkpoint_every: 200
   validation_episodes: 4
   resample_episodes: true
   target_from_context: false

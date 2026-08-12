@@ -10,14 +10,14 @@ Given exactly one ScanNet++ source view, predict one complete Power Foam and sup
 
 - Data: four audited native ScanNet++ undistorted DSLR scenes already staged on `KW60898`.
 - Scene split: train `{00a231a370, f9397af4cb, fd361ab85f}`; validation `{ff17657f71}`.
-- Resolution: center-crop released 1752×1168 pinhole images to 1168², resize to 160².
+- Resolution: center-crop released 1752×1168 pinhole images to 1168², resize to 80² for the overnight pilot.
 - Input: one source view.
-- Output: one `FoamParameters` object with 25,600 cells.
-- Supervision: arithmetic mean photometric loss over all N target renders before one backward pass.
+- Output: one `FoamParameters` object with 6,400 cells.
+- Supervision: arithmetic mean photometric loss over all N target renders before one backward pass. Targets are sampled from the 32 nearest camera centers to the source, avoiding arbitrary low-overlap pairs.
 - Density: fixed raw density 10,000 for this first RGB-only test; no alpha loss.
 - Geometry/appearance: corrected physical residual head at commit recorded below.
 - Validation: four deterministic episodes on the scene-disjoint validation scene every 250 steps.
-- Runs: 5,000 steps, seed 17, target counts 1/2/4/8.
+- Runs: 2,000 steps, seed 17, target counts 1/2/4/8.
 - Resume: atomic `latest.pt` stores head, optimizer, RNG, scene/view sampler state, history, and config.
 
 ## Configs

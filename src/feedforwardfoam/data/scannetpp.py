@@ -35,6 +35,7 @@ class ScanNetPPDataset(Dataset[NvsEpisode]):
         target_views: int,
         image_downsample: int = 1,
         image_resolution: int | None = None,
+        target_pool_size: int | None = None,
         seed: int = 0,
     ) -> None:
         self.scene_root = Path(scene_root)
@@ -42,6 +43,7 @@ class ScanNetPPDataset(Dataset[NvsEpisode]):
         self.target_views = target_views
         self.image_downsample = image_downsample
         self.image_resolution = image_resolution
+        self.target_pool_size = target_pool_size
         self.generator = torch.Generator().manual_seed(seed)
         manifest_path = self.scene_root / "fffoam_views.json"
         if manifest_path.exists():
@@ -141,9 +143,30 @@ class ScanNetPPDataset(Dataset[NvsEpisode]):
             name=name,
         )
 
+    @staticmethod
+    def _frame_c2w(frame: dict) -> torch.Tensor:
+        return torch.tensor(frame.get("transform_matrix", frame.get("c2w")), dtype=torch.float32)
+
+    def _sample_indices(self, generator: torch.Generator) -> list[int]:
+        source = int(torch.randint(len(self.frames), (), generator=generator))
+        if self.target_pool_size is None:
+            remaining = torch.randperm(len(self.frames), generator=generator).tolist()
+            targets = [index for index in remaining if index != source][: self.target_views]
+        else:
+            source_center = self._frame_c2w(self.frames[source])[:3, 3]
+            centers = torch.stack([self._frame_c2w(frame)[:3, 3] for frame in self.frames])
+            distances = torch.linalg.vector_norm(centers - source_center, dim=-1)
+            distances[source] = torch.inf
+            pool_size = min(
+                max(self.target_pool_size, self.target_views), len(self.frames) - 1
+            )
+            pool = distances.topk(pool_size, largest=False).indices
+            order = torch.randperm(pool_size, generator=generator)[: self.target_views]
+            targets = pool[order].tolist()
+        return [source, *targets]
+
     def sample_episode(self) -> NvsEpisode:
-        indices = torch.randperm(len(self.frames), generator=self.generator).tolist()
-        return self.episode_from_indices(indices[: self.context_views + self.target_views])
+        return self.episode_from_indices(self._sample_indices(self.generator))
 
     def episode_from_indices(self, indices: list[int]) -> NvsEpisode:
         if len(indices) != self.context_views + self.target_views:

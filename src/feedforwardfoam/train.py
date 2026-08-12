@@ -76,6 +76,7 @@ def _build_datasets(config: dict[str, Any], data_root: Path):
             context_views=context_views,
             target_views=target_views,
             image_resolution=resolution,
+            target_pool_size=int(data_cfg.get("target_pool_size", 32)),
             seed=int(config["seed"]),
         )
         val_dataset = MultiSceneScanNetPP(
@@ -85,6 +86,7 @@ def _build_datasets(config: dict[str, Any], data_root: Path):
             context_views=context_views,
             target_views=target_views,
             image_resolution=resolution,
+            target_pool_size=int(data_cfg.get("target_pool_size", 32)),
             seed=int(config["seed"]) + 10_000,
         )
         return train_dataset, val_dataset

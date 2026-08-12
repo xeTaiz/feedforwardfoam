@@ -22,6 +22,7 @@ class MultiSceneScanNetPP:
         context_views: int,
         target_views: int,
         image_resolution: int,
+        target_pool_size: int | None,
         seed: int,
     ) -> None:
         self.data_root = Path(data_root)
@@ -41,6 +42,7 @@ class MultiSceneScanNetPP:
                 context_views=context_views,
                 target_views=target_views,
                 image_resolution=image_resolution,
+                target_pool_size=target_pool_size,
                 seed=seed + index,
             )
             for index, scene_id in enumerate(scene_ids)
@@ -56,12 +58,7 @@ class MultiSceneScanNetPP:
         episodes = []
         for index in range(count):
             dataset = self.datasets[index % len(self.datasets)]
-            permutation = torch.randperm(len(dataset.frames), generator=generator).tolist()
-            episodes.append(
-                dataset.episode_from_indices(
-                    permutation[: dataset.context_views + dataset.target_views]
-                )
-            )
+            episodes.append(dataset.episode_from_indices(dataset._sample_indices(generator)))
         return tuple(episodes)
 
     def state_dict(self) -> dict:

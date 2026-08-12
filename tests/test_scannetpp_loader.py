@@ -68,6 +68,7 @@ def test_multiscene_split_sampling_and_state_roundtrip(tmp_path):
         context_views=1,
         target_views=2,
         image_resolution=8,
+        target_pool_size=4,
         seed=4,
     )
     state = dataset.state_dict()
@@ -85,6 +86,7 @@ def test_multiscene_split_sampling_and_state_roundtrip(tmp_path):
         context_views=1,
         target_views=2,
         image_resolution=8,
+        target_pool_size=4,
         seed=5,
     )
     episodes = validation.fixed_episodes(3, seed=6)
