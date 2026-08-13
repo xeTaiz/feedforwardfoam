@@ -132,9 +132,12 @@ def _episode_objective(
             rgb_losses.append(_rgb_loss(output.rgb, target, rgb_loss_name))
         else:
             mask = masks[index].to(device)
-            if not mask.any():
-                raise ValueError("Visibility mask contains no supported target pixels")
-            rgb_losses.append(_rgb_loss(output.rgb[mask], target[mask], rgb_loss_name))
+            if mask.any():
+                rgb_losses.append(_rgb_loss(output.rgb[mask], target[mask], rgb_loss_name))
+            else:
+                # Predicted context geometry can occasionally have no projected
+                # support. Fall back to full RGB rather than dropping the step.
+                rgb_losses.append(_rgb_loss(output.rgb, target, rgb_loss_name))
         if alpha_weight > 0:
             if target_view.alpha is None:
                 raise ValueError("alpha_loss_weight requires target alpha")
@@ -367,7 +370,9 @@ def train(
         )
         optimizer.zero_grad(set_to_none=True)
         loss.backward()
-        grad_norm = torch.nn.utils.clip_grad_norm_(head.parameters(), 1.0)
+        grad_norm = torch.nn.utils.clip_grad_norm_(
+            head.parameters(), 1.0, error_if_nonfinite=True
+        )
         optimizer.step()
 
         per_target = [

@@ -41,6 +41,9 @@ def _resize_map(values: torch.Tensor, height: int, width: int) -> torch.Tensor:
 def align_depths_to_calibrated_cameras(
     features: dict[str, torch.Tensor],
     context_views: tuple[View, ...],
+    *,
+    minimum_scale: float = 0.25,
+    maximum_scale: float = 4.0,
 ) -> tuple[torch.Tensor, DepthAlignment]:
     """Scale VGGT depth into the calibrated scene gauge using camera baselines.
 
@@ -75,7 +78,7 @@ def align_depths_to_calibrated_cameras(
     valid = (predicted_distances > 1e-6) & torch.isfinite(predicted_distances)
     ratios = calibrated_distances[valid] / predicted_distances[valid]
     scale = ratios.median() if ratios.numel() else torch.ones((), device=depths.device)
-    scale = scale.clamp(1e-3, 1e3)
+    scale = scale.clamp(minimum_scale, maximum_scale)
     aligned = (depths * scale).clamp_min(1e-3)
     return aligned, DepthAlignment(
         scale=scale,
