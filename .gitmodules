@@ -4,3 +4,18 @@
 [submodule "external/powerfoam"]
 	path = external/powerfoam
 	url = https://github.com/theialab/powerfoam.git
+[submodule "external/references/depth-anything-3"]
+	path = external/references/depth-anything-3
+	url = https://github.com/ByteDance-Seed/Depth-Anything-3.git
+[submodule "external/references/mvsplat"]
+	path = external/references/mvsplat
+	url = https://github.com/donydchen/mvsplat.git
+[submodule "external/references/pixelsplat"]
+	path = external/references/pixelsplat
+	url = https://github.com/dcharatan/pixelsplat.git
+[submodule "external/references/splatt3r"]
+	path = external/references/splatt3r
+	url = https://github.com/btsmart/splatt3r.git
+[submodule "external/references/streamsplat"]
+	path = external/references/streamsplat
+	url = https://github.com/nickwzk/StreamSplat.git
