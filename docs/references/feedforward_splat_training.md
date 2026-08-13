@@ -2,6 +2,8 @@
 
 Status: source audit, 2026-08-14
 
+See also `future_head_directions.md` for the longer-term experiment and architecture backlog.
+
 This note records the training contracts that matter for the current failure:
 the MV2 Power Foam head reconstructs its source camera at **46.39 dB**, but
 cross-renders at only **5.27 dB**. That is a geometry/generalization failure,

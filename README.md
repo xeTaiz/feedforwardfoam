@@ -50,8 +50,9 @@ canonical-view architecture with a 14-channel per-patch output (vs. 394 for
 the foam) and renders via `gsplat.rasterization` in `RGB+D` / `classic`
 mode. The source-audited training comparison against DA3, MVSplat, pixelSplat,
 Splatt3R, StreamSplat, FlashMono, and Anchor3R is in
-`docs/references/feedforward_splat_training.md`; released reference code is
-pinned under `external/references/` and is never imported by the project.
+`docs/references/feedforward_splat_training.md`; the broader future-head idea
+backlog is in `docs/references/future_head_directions.md`. Released reference
+code is pinned under `external/references/` and is never imported by the project.
 Install on a CUDA host with `uv pip install -e '.[gsplat]'` and run it with:
 
 ```bash
