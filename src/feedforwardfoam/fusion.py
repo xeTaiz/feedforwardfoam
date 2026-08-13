@@ -57,7 +57,12 @@ def align_depths_to_calibrated_cameras(
             samples=0,
         )
         return depths, alignment
-    predicted_c2w = torch.linalg.inv(features["predicted_extrinsics"].float())
+    predicted_w2c = features["predicted_extrinsics"].float()
+    homogeneous = torch.eye(4, device=depths.device, dtype=depths.dtype).expand(
+        *predicted_w2c.shape[:-2], 4, 4
+    ).clone()
+    homogeneous[..., :3, :4] = predicted_w2c
+    predicted_c2w = torch.linalg.inv(homogeneous)
     predicted_centers = predicted_c2w[0, : len(context_views), :3, 3]
     calibrated_centers = torch.stack(
         [view.c2w[:3, 3].to(depths) for view in context_views]
