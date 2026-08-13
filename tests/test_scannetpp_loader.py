@@ -69,6 +69,7 @@ def test_multiscene_split_sampling_and_state_roundtrip(tmp_path):
         target_views=2,
         image_resolution=8,
         target_pool_size=4,
+        reserve_support_view=False,
         seed=4,
     )
     state = dataset.state_dict()
@@ -87,6 +88,7 @@ def test_multiscene_split_sampling_and_state_roundtrip(tmp_path):
         target_views=2,
         image_resolution=8,
         target_pool_size=4,
+        reserve_support_view=False,
         seed=5,
     )
     episodes = validation.fixed_episodes(3, seed=6)
@@ -109,6 +111,30 @@ def test_native_scannetpp_samples_two_contexts_and_separate_target(tmp_path):
     assert len(episode.context) == 2
     assert len(episode.target) == 1
     assert len({view.name for view in episode.context + episode.target}) == 3
+
+
+def test_one_context_control_can_reserve_the_two_context_support_view(tmp_path):
+    scene = _write_native_scene(tmp_path, "reserved", views=12)
+    seed = 11
+    two_context = ScanNetPPDataset(
+        scene,
+        split="train",
+        context_views=2,
+        target_views=1,
+        target_pool_size=6,
+        seed=seed,
+    ).sample_episode()
+    control = ScanNetPPDataset(
+        scene,
+        split="train",
+        context_views=1,
+        target_views=1,
+        target_pool_size=6,
+        reserve_support_view=True,
+        seed=seed,
+    ).sample_episode()
+    assert control.context[0].name == two_context.context[0].name
+    assert control.target[0].name == two_context.target[0].name
 
 
 def test_native_scannetpp_rejects_off_center_intrinsics(tmp_path):

@@ -23,6 +23,7 @@ class MultiSceneScanNetPP:
         target_views: int,
         image_resolution: int,
         target_pool_size: int | None,
+        reserve_support_view: bool,
         seed: int,
     ) -> None:
         self.data_root = Path(data_root)
@@ -43,6 +44,7 @@ class MultiSceneScanNetPP:
                 target_views=target_views,
                 image_resolution=image_resolution,
                 target_pool_size=target_pool_size,
+                reserve_support_view=reserve_support_view,
                 seed=seed + index,
             )
             for index, scene_id in enumerate(scene_ids)

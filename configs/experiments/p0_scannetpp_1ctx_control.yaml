@@ -35,6 +35,7 @@ data:
   target_views: 1
   target_pool_size: 24
   image_downsample: 1
+  reserve_support_view: true
 train:
   steps: 2000
   learning_rate: 0.0001

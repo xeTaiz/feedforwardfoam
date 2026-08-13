@@ -36,6 +36,7 @@ class ScanNetPPDataset(Dataset[NvsEpisode]):
         image_downsample: int = 1,
         image_resolution: int | None = None,
         target_pool_size: int | None = None,
+        reserve_support_view: bool = False,
         seed: int = 0,
     ) -> None:
         self.scene_root = Path(scene_root)
@@ -44,6 +45,7 @@ class ScanNetPPDataset(Dataset[NvsEpisode]):
         self.image_downsample = image_downsample
         self.image_resolution = image_resolution
         self.target_pool_size = target_pool_size
+        self.reserve_support_view = reserve_support_view
         self.generator = torch.Generator().manual_seed(seed)
         manifest_path = self.scene_root / "fffoam_views.json"
         if manifest_path.exists():
@@ -149,7 +151,8 @@ class ScanNetPPDataset(Dataset[NvsEpisode]):
 
     def _sample_indices(self, generator: torch.Generator) -> list[int]:
         source = int(torch.randint(len(self.frames), (), generator=generator))
-        needed = self.context_views - 1 + self.target_views
+        reserved = int(self.reserve_support_view and self.context_views == 1)
+        needed = self.context_views - 1 + self.target_views + reserved
         if self.target_pool_size is None:
             remaining = torch.randperm(len(self.frames), generator=generator).tolist()
             selected = [index for index in remaining if index != source][:needed]
@@ -168,7 +171,8 @@ class ScanNetPPDataset(Dataset[NvsEpisode]):
             order = torch.randperm(pool_size, generator=generator)[:needed]
             selected = pool[order].tolist()
         contexts = [source, *selected[: self.context_views - 1]]
-        targets = selected[self.context_views - 1 :]
+        target_start = self.context_views - 1 + reserved
+        targets = selected[target_start:]
         return [*contexts, *targets]
 
     def sample_episode(self) -> NvsEpisode:
