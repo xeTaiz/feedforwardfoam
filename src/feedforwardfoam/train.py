@@ -147,8 +147,11 @@ def _episode_objective(
 
 def _predict(head, backbone, episode, representation: str, device: torch.device):
     images = _context_tensor(episode, device)
-    with torch.inference_mode():
+    with torch.no_grad():
         features = backbone(images)
+    # FrozenVGGTOmega uses inference mode internally. Clone its outputs into
+    # ordinary no-grad tensors before feeding trainable projection layers.
+    features = {name: value.clone() for name, value in features.items()}
     ray_map = pinhole_ray_map_from_view(episode.context[0], device)
     support = build_canonical_support(images, features, episode.context, device)
     if representation == "foam":
