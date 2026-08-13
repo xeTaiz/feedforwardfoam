@@ -11,6 +11,15 @@ from .renderer import pinhole_ray_map_from_view
 
 
 @dataclass(frozen=True)
+class DepthAlignment:
+    """Affine map from predicted VGGT z-depth into the calibrated scene gauge."""
+
+    scale: torch.Tensor
+    offset: torch.Tensor
+    samples: int
+
+
+@dataclass(frozen=True)
 class CanonicalSupport:
     """One supporting view sampled at every canonical pixel."""
 
@@ -27,6 +36,44 @@ def _resize_map(values: torch.Tensor, height: int, width: int) -> torch.Tensor:
     if values.shape[-2:] != (height, width):
         values = F.interpolate(values, (height, width), mode="bilinear", align_corners=True)
     return values
+
+
+def align_depths_to_calibrated_cameras(
+    features: dict[str, torch.Tensor],
+    context_views: tuple[View, ...],
+) -> tuple[torch.Tensor, DepthAlignment]:
+    """Scale VGGT depth into the calibrated scene gauge using camera baselines.
+
+    VGGT-Ω predicts cameras and depth in one shared up-to-scale gauge. For two
+    or more contexts, the ratio between calibrated and predicted camera-center
+    baselines supplies one robust scale that is applied to every context depth.
+    With one context there is no scale evidence, so the input depth is retained.
+    """
+    depths = features["depth"].float()
+    if len(context_views) < 2:
+        alignment = DepthAlignment(
+            scale=torch.ones((), device=depths.device),
+            offset=torch.zeros((), device=depths.device),
+            samples=0,
+        )
+        return depths, alignment
+    predicted_c2w = torch.linalg.inv(features["predicted_extrinsics"].float())
+    predicted_centers = predicted_c2w[0, : len(context_views), :3, 3]
+    calibrated_centers = torch.stack(
+        [view.c2w[:3, 3].to(depths) for view in context_views]
+    )
+    predicted_distances = torch.pdist(predicted_centers)
+    calibrated_distances = torch.pdist(calibrated_centers)
+    valid = (predicted_distances > 1e-6) & torch.isfinite(predicted_distances)
+    ratios = calibrated_distances[valid] / predicted_distances[valid]
+    scale = ratios.median() if ratios.numel() else torch.ones((), device=depths.device)
+    scale = scale.clamp(1e-3, 1e3)
+    aligned = (depths * scale).clamp_min(1e-3)
+    return aligned, DepthAlignment(
+        scale=scale,
+        offset=torch.zeros((), device=depths.device),
+        samples=int(ratios.numel()),
+    )
 
 
 def world_points_from_z_depth(

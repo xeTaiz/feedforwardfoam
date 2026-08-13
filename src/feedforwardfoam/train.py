@@ -15,6 +15,7 @@ from .backbone import FrozenGeometryStub, FrozenVGGTOmega
 from .data.blender import BlenderNvsDataset
 from .data.multiscene import MultiSceneScanNetPP
 from .fusion import (
+    align_depths_to_calibrated_cameras,
     build_canonical_support,
     projected_context_support_mask,
     world_points_from_z_depth,
@@ -152,6 +153,9 @@ def _predict(head, backbone, episode, representation: str, device: torch.device)
     # FrozenVGGTOmega uses inference mode internally. Clone its outputs into
     # ordinary no-grad tensors before feeding trainable projection layers.
     features = {name: value.clone() for name, value in features.items()}
+    aligned_depths, alignment = align_depths_to_calibrated_cameras(features, episode.context)
+    features["depth"] = aligned_depths
+    features["depth_alignment_scale"] = alignment.scale[None]
     ray_map = pinhole_ray_map_from_view(episode.context[0], device)
     support = build_canonical_support(images, features, episode.context, device)
     if representation == "foam":

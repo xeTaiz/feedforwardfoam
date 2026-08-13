@@ -65,6 +65,12 @@ class FrozenVGGTOmega(nn.Module):
                 images=images,
                 patch_token_start=patch_start,
             )
+            pose_enc = self.model.camera_head(tokens, patch_token_start=patch_start)
+            from vggt_omega.utils.pose_enc import encoding_to_camera
+
+            predicted_extrinsics, predicted_intrinsics = encoding_to_camera(
+                pose_enc, images.shape[-2:]
+            )
         patch_tokens = final_tokens[:, :, patch_start:].float()
         patch_height = images.shape[-2] // self.model.aggregator.patch_size
         patch_width = images.shape[-1] // self.model.aggregator.patch_size
@@ -76,6 +82,8 @@ class FrozenVGGTOmega(nn.Module):
             "depth_conf": _channel_first_dense_map(depth_conf),
             "registers": final_tokens[:, :, 1:patch_start].float(),
             "patch_tokens": patch_tokens,
+            "predicted_extrinsics": predicted_extrinsics,
+            "predicted_intrinsics": predicted_intrinsics,
         }
 
 
