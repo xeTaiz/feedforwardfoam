@@ -391,6 +391,12 @@ def train(
                 if representation == "foam"
                 else params.scales.detach().mean()
             ),
+            "depth_alignment_scale": float(features["depth_alignment_scale"].mean()),
+            "visibility_mask_fraction": float(
+                torch.stack([mask.float().mean() for mask in masks]).mean()
+                if masks is not None
+                else 1.0
+            ),
         }
         if val_episodes and step % int(train_cfg["validate_every"]) == 0:
             record.update(
