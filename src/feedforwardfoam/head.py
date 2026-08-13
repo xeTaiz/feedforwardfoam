@@ -127,6 +127,8 @@ class CanonicalPowerFoamHead(nn.Module):
         point_residual_scale: float = 0.05,
         normal_residual_radians: float = 0.25,
         rgb_residual_scale: float = 0.5,
+        fusion_mode: str = "none",
+        patch_token_dim: int | None = None,
     ) -> None:
         super().__init__()
         if radius_mode not in {"learned_absolute", "pixel_footprint"}:
@@ -135,6 +137,10 @@ class CanonicalPowerFoamHead(nn.Module):
             raise ValueError(f"Unknown density mode: {density_mode}")
         if base_depth_mode not in {"predicted", "constant"}:
             raise ValueError(f"Unknown base depth mode: {base_depth_mode}")
+        if fusion_mode not in {"none", "projected"}:
+            raise ValueError(f"Unknown fusion mode: {fusion_mode}")
+        if fusion_mode == "projected" and patch_token_dim is None:
+            raise ValueError("Projected fusion requires patch_token_dim")
         self.max_cells = max_cells
         self.num_texel_sites = num_texel_sites
         self.spherical_voronoi_dof = spherical_voronoi_dof
@@ -150,6 +156,7 @@ class CanonicalPowerFoamHead(nn.Module):
         self.point_residual_scale = point_residual_scale
         self.normal_residual_radians = normal_residual_radians
         self.rgb_residual_scale = rgb_residual_scale
+        self.fusion_mode = fusion_mode
         self.local = nn.Sequential(
             nn.Conv2d(5, hidden_dim, 3, padding=1),
             nn.GELU(),
@@ -157,6 +164,20 @@ class CanonicalPowerFoamHead(nn.Module):
             nn.GELU(),
         )
         self.register_projection = nn.Linear(register_dim, hidden_dim)
+        self.support_map_projection = (
+            nn.Sequential(
+                nn.Conv2d(7, hidden_dim, 3, padding=1),
+                nn.GELU(),
+                nn.Conv2d(hidden_dim, hidden_dim, 3, padding=1),
+            )
+            if fusion_mode == "projected"
+            else None
+        )
+        self.support_token_projection = (
+            nn.Conv2d(int(patch_token_dim), hidden_dim, 1)
+            if fusion_mode == "projected"
+            else None
+        )
         # point residual, radius, quaternion, density, confidence/gate,
         # spherical axes, and spherical RGB values.
         self.output_dim = 3 + 1 + 4 + 1 + 1 + 2 * num_texel_sites * spherical_voronoi_dof * 3
@@ -204,6 +225,8 @@ class CanonicalPowerFoamHead(nn.Module):
         frozen_features: dict[str, torch.Tensor],
         canonical_ray_map: torch.Tensor,
         canonical_alpha: torch.Tensor | None = None,
+        canonical_support=None,
+        canonical_base_points: torch.Tensor | None = None,
     ) -> FoamParameters:
         """Decode a batch-size-one canonical scene.
 
@@ -217,6 +240,26 @@ class CanonicalPowerFoamHead(nn.Module):
         register_feature = self.register_projection(registers.mean(dim=(1, 2)))
         local = self.local(torch.cat([image, depth, confidence], dim=1))
         local = local + register_feature[:, :, None, None]
+        if self.fusion_mode == "projected":
+            if canonical_support is None:
+                raise ValueError("Projected fusion requires canonical support evidence")
+            assert self.support_map_projection is not None
+            assert self.support_token_projection is not None
+            support_maps = F.interpolate(
+                canonical_support.maps,
+                size=local.shape[-2:],
+                mode="bilinear",
+                align_corners=True,
+            )
+            support_tokens = self.support_token_projection(canonical_support.patch_tokens)
+            support_tokens = F.grid_sample(
+                support_tokens,
+                canonical_support.grid,
+                mode="bilinear",
+                padding_mode="zeros",
+                align_corners=True,
+            )
+            local = local + self.support_map_projection(support_maps) + support_tokens
         h, w = local.shape[-2:]
         tokens = local.permute(0, 2, 3, 1).reshape(1, h * w, -1)
         logits = self.decode(tokens)[0]
@@ -240,7 +283,18 @@ class CanonicalPowerFoamHead(nn.Module):
             depth = torch.full_like(depth, self.constant_base_depth)
 
         ray_directions = ray_map[:, 3:].reshape(h, w, 3)
-        base_points = ray_map[:, :3].reshape(h, w, 3) + depth[0, 0, ..., None] * ray_directions
+        if canonical_base_points is None:
+            base_points = (
+                ray_map[:, :3].reshape(h, w, 3)
+                + depth[0, 0, ..., None] * ray_directions
+            )
+        else:
+            base_points = canonical_base_points.to(values).permute(2, 0, 1)[None]
+            if base_points.shape[-2:] != (h, w):
+                base_points = F.interpolate(
+                    base_points, size=(h, w), mode="bilinear", align_corners=True
+                )
+            base_points = base_points[0].permute(1, 2, 0)
         base_points_selected = base_points.reshape(-1, 3)[selected]
         point_residual = self.point_residual_scale * torch.tanh(values[:, :3])
         points = base_points_selected + point_residual

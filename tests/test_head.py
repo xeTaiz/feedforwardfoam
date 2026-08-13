@@ -1,5 +1,6 @@
 import torch
 
+from feedforwardfoam.fusion import CanonicalSupport
 from feedforwardfoam.head import (
     CanonicalPowerFoamHead,
     depth_normals,
@@ -137,6 +138,34 @@ def test_zero_residual_head_uses_camera_facing_base_geometry_and_centered_rgb():
     expected_rgb = images[0, 0].permute(1, 2, 0).reshape(-1, 3)[matched] - 0.5
     actual_rgb = params.texel_sv_rgb.reshape(12, 8, 8, 3)
     assert torch.allclose(actual_rgb[:, 0, 0], expected_rgb, atol=1e-6)
+
+
+def test_projected_support_fusion_still_decodes_one_foam():
+    head = CanonicalPowerFoamHead(
+        register_dim=8,
+        hidden_dim=16,
+        max_cells=6,
+        fusion_mode="projected",
+        patch_token_dim=8,
+    )
+    images = torch.rand(1, 2, 3, 4, 4)
+    features = {
+        "depth": torch.ones(1, 2, 1, 4, 4),
+        "depth_conf": torch.ones(1, 2, 1, 4, 4),
+        "registers": torch.randn(1, 2, 3, 8),
+    }
+    rays = torch.zeros(4, 4, 6)
+    rays[..., 5] = 1
+    axis = torch.linspace(-1, 1, 4)
+    yy, xx = torch.meshgrid(axis, axis, indexing="ij")
+    support = CanonicalSupport(
+        maps=torch.randn(1, 7, 4, 4),
+        patch_tokens=torch.randn(1, 8, 2, 2),
+        grid=torch.stack([xx, yy], dim=-1)[None],
+    )
+    params = head(images, features, rays, canonical_support=support)
+    assert params.points.shape == (6, 3)
+    assert params.texel_sv_rgb.shape == (6, 8, 24)
 
 
 def test_source_alpha_fixed_density_makes_background_cells_empty():

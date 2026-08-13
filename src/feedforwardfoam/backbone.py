@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Protocol
 
 import torch
+import torch.nn.functional as F
 from torch import nn
 
 
@@ -54,12 +55,27 @@ class FrozenVGGTOmega(nn.Module):
 
     @torch.inference_mode()
     def forward(self, images: torch.Tensor) -> dict[str, torch.Tensor]:
-        prediction = self.model(images)
-        camera_and_registers = prediction["camera_and_register_tokens"]
+        amp_dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+        with torch.autocast(device_type="cuda", dtype=amp_dtype):
+            tokens, patch_start = self.model.aggregator(images)
+        final_tokens = tokens[-1]
+        with torch.autocast(device_type="cuda", enabled=False):
+            depth, depth_conf = self.model.dense_head(
+                tokens,
+                images=images,
+                patch_token_start=patch_start,
+            )
+        patch_tokens = final_tokens[:, :, patch_start:].float()
+        patch_height = images.shape[-2] // self.model.aggregator.patch_size
+        patch_width = images.shape[-1] // self.model.aggregator.patch_size
+        patch_tokens = patch_tokens.reshape(
+            images.shape[0], images.shape[1], patch_height, patch_width, -1
+        ).permute(0, 1, 4, 2, 3)
         return {
-            "depth": _channel_first_dense_map(prediction["depth"]),
-            "depth_conf": _channel_first_dense_map(prediction["depth_conf"]),
-            "registers": camera_and_registers[:, :, 1:],
+            "depth": _channel_first_dense_map(depth),
+            "depth_conf": _channel_first_dense_map(depth_conf),
+            "registers": final_tokens[:, :, 1:patch_start].float(),
+            "patch_tokens": patch_tokens,
         }
 
 
@@ -80,4 +96,13 @@ class FrozenGeometryStub(nn.Module):
         confidence = torch.ones_like(depth)
         summary = images.mean(dim=(2, 3, 4), keepdim=False)
         registers = summary[..., None, None].expand(b, v, self.register_count, self.register_dim)
-        return {"depth": depth, "depth_conf": confidence, "registers": registers}
+        patch_tokens = F.avg_pool2d(images.reshape(b * v, 3, _h, _w), 2, 2).mean(dim=1, keepdim=True)
+        patch_tokens = patch_tokens.expand(b * v, self.register_dim, -1, -1).reshape(
+            b, v, self.register_dim, patch_tokens.shape[-2], patch_tokens.shape[-1]
+        )
+        return {
+            "depth": depth,
+            "depth_conf": confidence,
+            "registers": registers,
+            "patch_tokens": patch_tokens,
+        }

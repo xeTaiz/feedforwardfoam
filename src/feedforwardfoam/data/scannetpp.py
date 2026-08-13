@@ -149,21 +149,27 @@ class ScanNetPPDataset(Dataset[NvsEpisode]):
 
     def _sample_indices(self, generator: torch.Generator) -> list[int]:
         source = int(torch.randint(len(self.frames), (), generator=generator))
+        needed = self.context_views - 1 + self.target_views
         if self.target_pool_size is None:
             remaining = torch.randperm(len(self.frames), generator=generator).tolist()
-            targets = [index for index in remaining if index != source][: self.target_views]
+            selected = [index for index in remaining if index != source][:needed]
         else:
-            source_center = self._frame_c2w(self.frames[source])[:3, 3]
+            source_c2w = self._frame_c2w(self.frames[source])
             centers = torch.stack([self._frame_c2w(frame)[:3, 3] for frame in self.frames])
-            distances = torch.linalg.vector_norm(centers - source_center, dim=-1)
-            distances[source] = torch.inf
-            pool_size = min(
-                max(self.target_pool_size, self.target_views), len(self.frames) - 1
-            )
-            pool = distances.topk(pool_size, largest=False).indices
-            order = torch.randperm(pool_size, generator=generator)[: self.target_views]
-            targets = pool[order].tolist()
-        return [source, *targets]
+            distances = torch.linalg.vector_norm(centers - source_c2w[:3, 3], dim=-1)
+            directions = torch.stack([-self._frame_c2w(frame)[:3, 2] for frame in self.frames])
+            source_direction = -source_c2w[:3, 2]
+            angle_penalty = 1.0 - (directions * source_direction).sum(dim=-1).clamp(-1, 1)
+            median_distance = distances[distances > 0].median().clamp_min(1e-6)
+            overlap_score = distances / median_distance + angle_penalty
+            overlap_score[source] = torch.inf
+            pool_size = min(max(self.target_pool_size, needed), len(self.frames) - 1)
+            pool = overlap_score.topk(pool_size, largest=False).indices
+            order = torch.randperm(pool_size, generator=generator)[:needed]
+            selected = pool[order].tolist()
+        contexts = [source, *selected[: self.context_views - 1]]
+        targets = selected[self.context_views - 1 :]
+        return [*contexts, *targets]
 
     def sample_episode(self) -> NvsEpisode:
         return self.episode_from_indices(self._sample_indices(self.generator))

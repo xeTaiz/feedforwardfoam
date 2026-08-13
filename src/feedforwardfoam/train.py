@@ -14,6 +14,11 @@ import yaml
 from .backbone import FrozenGeometryStub, FrozenVGGTOmega
 from .data.blender import BlenderNvsDataset
 from .data.multiscene import MultiSceneScanNetPP
+from .fusion import (
+    build_canonical_support,
+    projected_context_support_mask,
+    world_points_from_z_depth,
+)
 from .gaussian import CanonicalGaussianHead, GaussianRendererBridge
 from .head import CanonicalPowerFoamHead
 from .renderer import (
@@ -54,8 +59,8 @@ def _build_datasets(config: dict[str, Any], data_root: Path):
     dataset_name = str(data_cfg.get("dataset", "blender"))
     context_views = int(data_cfg["context_views"])
     target_views = int(data_cfg["target_views"])
-    if context_views != 1:
-        raise ValueError("P0 one-source experiments require data.context_views == 1")
+    if context_views not in {1, 2}:
+        raise ValueError("Canonical experiments require one or two context views")
     if dataset_name == "blender":
         train_dataset = BlenderNvsDataset(
             data_root,
@@ -116,12 +121,19 @@ def _episode_objective(
     rgb_loss_name: str,
     alpha_weight: float,
     device: torch.device,
+    masks=None,
 ):
     rgb_losses = []
     alpha_losses = []
-    for output, target_view in zip(outputs, target_views, strict=True):
+    for index, (output, target_view) in enumerate(zip(outputs, target_views, strict=True)):
         target = target_view.image.to(device)
-        rgb_losses.append(_rgb_loss(output.rgb, target, rgb_loss_name))
+        if masks is None:
+            rgb_losses.append(_rgb_loss(output.rgb, target, rgb_loss_name))
+        else:
+            mask = masks[index].to(device)
+            if not mask.any():
+                raise ValueError("Visibility mask contains no supported target pixels")
+            rgb_losses.append(_rgb_loss(output.rgb[mask], target[mask], rgb_loss_name))
         if alpha_weight > 0:
             if target_view.alpha is None:
                 raise ValueError("alpha_loss_weight requires target alpha")
@@ -138,9 +150,22 @@ def _predict(head, backbone, episode, representation: str, device: torch.device)
     with torch.inference_mode():
         features = backbone(images)
     ray_map = pinhole_ray_map_from_view(episode.context[0], device)
+    support = build_canonical_support(images, features, episode.context, device)
     if representation == "foam":
-        return head(images, features, ray_map, episode.context[0].alpha)
-    return head(images, features, ray_map)
+        canonical_points = world_points_from_z_depth(
+            episode.context[0], features["depth"][:, 0], device
+        )
+        params = head(
+            images,
+            features,
+            ray_map,
+            episode.context[0].alpha,
+            canonical_support=support,
+            canonical_base_points=canonical_points,
+        )
+    else:
+        params = head(images, features, ray_map)
+    return params, features
 
 
 def _validation(
@@ -156,7 +181,7 @@ def _validation(
     alpha_values = []
     with torch.no_grad():
         for episode in episodes:
-            params = _predict(head, backbone, episode, representation, device)
+            params, _ = _predict(head, backbone, episode, representation, device)
             outputs = _render_targets(params, episode.target, bridge, representation, device)
             for output, target_view in zip(outputs, episode.target, strict=True):
                 mse_values.append(
@@ -238,6 +263,8 @@ def train(
             point_residual_scale=float(head_cfg.get("point_residual_scale", 0.05)),
             normal_residual_radians=float(head_cfg.get("normal_residual_radians", 0.25)),
             rgb_residual_scale=float(head_cfg.get("rgb_residual_scale", 0.5)),
+            fusion_mode=str(head_cfg.get("fusion_mode", "none")),
+            patch_token_dim=register_dim,
         ).to(device)
     elif representation == "gaussian":
         head = CanonicalGaussianHead(
@@ -305,15 +332,31 @@ def train(
     )
     for step in range(start_step, int(train_cfg["steps"]) + 1):
         episode = _sample_episode(train_dataset, step, resample, fixed_episode)
-        params = _predict(head, backbone, episode, representation, device)
+        params, features = _predict(head, backbone, episode, representation, device)
         target_views = episode.context if bool(train_cfg.get("target_from_context", False)) else episode.target
         outputs = _render_targets(params, target_views, bridge, representation, device)
+        use_mask = bool(train_cfg.get("visibility_mask", False))
+        masks = (
+            [
+                projected_context_support_mask(
+                    episode.context,
+                    features["depth"],
+                    target,
+                    device,
+                    dilation=int(train_cfg.get("visibility_mask_dilation", 2)),
+                )
+                for target in target_views
+            ]
+            if use_mask
+            else None
+        )
         loss, rgb_loss, alpha_loss = _episode_objective(
             outputs,
             target_views,
             rgb_loss_name=str(train_cfg.get("rgb_loss", "charbonnier")),
             alpha_weight=float(train_cfg.get("alpha_loss_weight", 0.0)),
             device=device,
+            masks=masks,
         )
         optimizer.zero_grad(set_to_none=True)
         loss.backward()

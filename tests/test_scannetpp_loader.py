@@ -94,6 +94,23 @@ def test_multiscene_split_sampling_and_state_roundtrip(tmp_path):
     assert len(episodes[0].target) == 2
 
 
+def test_native_scannetpp_samples_two_contexts_and_separate_target(tmp_path):
+    scene = _write_native_scene(tmp_path, "two-context", views=12)
+    dataset = ScanNetPPDataset(
+        scene,
+        split="train",
+        context_views=2,
+        target_views=1,
+        image_resolution=8,
+        target_pool_size=6,
+        seed=9,
+    )
+    episode = dataset.sample_episode()
+    assert len(episode.context) == 2
+    assert len(episode.target) == 1
+    assert len({view.name for view in episode.context + episode.target}) == 3
+
+
 def test_native_scannetpp_rejects_off_center_intrinsics(tmp_path):
     scene = _write_native_scene(tmp_path, "bad")
     path = scene / "dslr" / "nerfstudio" / "transforms_undistorted.json"
