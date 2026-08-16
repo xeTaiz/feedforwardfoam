@@ -205,6 +205,13 @@ def optimize(args: argparse.Namespace) -> None:
         if not (fixed_density and name == "density")
     ]
     optimizer = torch.optim.AdamW(optimized, lr=args.learning_rate, weight_decay=0.0)
+    scheduler = (
+        torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer, T_max=max(args.steps, 1), eta_min=args.min_learning_rate
+        )
+        if args.learning_rate_schedule == "cosine"
+        else None
+    )
 
     bridge = PowerFoamRendererBridge(
         powerfoam_args(
@@ -239,6 +246,8 @@ def optimize(args: argparse.Namespace) -> None:
         "initialization": "checkpoint" if args.init_checkpoint else "fresh_exact",
         "steps": args.steps,
         "learning_rate": args.learning_rate,
+        "learning_rate_schedule": args.learning_rate_schedule,
+        "min_learning_rate": args.min_learning_rate,
         "render_every": args.render_every,
         "visibility_mask": args.visibility_mask,
         "visibility_mask_contexts": "canonical",
@@ -258,6 +267,8 @@ def optimize(args: argparse.Namespace) -> None:
             loss = _mse(outputs, episode, device, support_masks if args.visibility_mask else None)
             loss.backward()
             optimizer.step()
+            if scheduler is not None:
+                scheduler.step()
 
         report = step % REPORT_EVERY == 0 or step == args.steps
         save_render = step % args.render_every == 0 or step == args.steps
@@ -265,7 +276,11 @@ def optimize(args: argparse.Namespace) -> None:
             with torch.no_grad():
                 evaluated = _render(parameters, episode, bridge, device)
             if report:
-                record = {"step": step, **_metrics(evaluated, episode, device, support_masks)}
+                record = {
+                    "step": step,
+                    "learning_rate": float(optimizer.param_groups[0]["lr"]),
+                    **_metrics(evaluated, episode, device, support_masks),
+                }
                 history.append(record)
                 (args.output_dir / "metrics.json").write_text(json.dumps(history, indent=2) + "\n")
                 print(json.dumps(record, sort_keys=True), flush=True)
@@ -287,6 +302,10 @@ def main() -> None:
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--steps", type=int, default=2000)
     parser.add_argument("--learning-rate", type=float, default=1e-3)
+    parser.add_argument(
+        "--learning-rate-schedule", choices=("constant", "cosine"), default="cosine"
+    )
+    parser.add_argument("--min-learning-rate", type=float, default=1e-6)
     parser.add_argument("--render-every", type=int, default=250)
     parser.add_argument(
         "--visibility-mask",
