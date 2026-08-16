@@ -1,6 +1,6 @@
 # Fixed ScanNet++ parallax-triplet overfit
 
-Status: running
+Status: first triplet complete; observable-region matrix running
 
 ## Purpose
 
@@ -51,10 +51,38 @@ The fixed image names are part of each config, so resume cannot silently select
 a different episode. Training validates that the target lies on the context
 camera segment before optimization.
 
-## Early signal
+## First-triplet results
 
-The two-context projected model exceeded 25 dB on the fixed held-out target by
-approximately step 160 and reached 26.39 dB at step 280. Gradients, radii,
-opacity, and the depth-alignment scale remained finite. This already shows that
-the two-context path can optimize the intended controlled triplet; final values
-and render inspection remain pending.
+| Arm | Final PSNR | Best PSNR | Best step | Last-1k slope |
+|---|---:|---:|---:|---:|
+| one context | 30.64 dB | 32.02 dB | 4,159 | -0.71 dB/1k |
+| two-context registers | 29.18 dB | 29.71 dB | 1,709 | +0.67 dB/1k |
+| two-context projected fusion | **31.23 dB** | **31.27 dB** | 4,971 | +0.52 dB/1k |
+
+All three completed 5,000 finite updates. They are budget-complete but not all
+strictly converged: constant-LR noise makes the one-context final lower than its
+best value, while both two-context curves still have positive last-1k slopes.
+The projected fusion path nevertheless demonstrates successful fixed-triplet
+overfitting and substantially outperforms the two-context registers-only arm.
+
+## Observable-region matrix
+
+A second matrix repeats projected-fusion overfitting on the selected top triplet
+and three deterministic random, geometrically valid triplets (seed 1701), one
+from each training scene. These runs train and report both full-frame and
+observable-region metrics. The observable mask projects the canonical view-1
+VGGT depth anchors into the target and dilates them by two target pixels; this
+matches the current representation, which creates cells only from view-1
+anchors. It intentionally does not credit view-2-only pixels, because view 2
+currently contributes features but no additional cells.
+
+| Run | Scene | Contexts → target | Baseline | Interpolation | Perpendicular fraction | Max angle |
+|---|---|---|---:|---:|---:|---:|
+| top masked | `f9397af4cb` | `04956,04970 → 04962` | 0.286 | 0.500 | 0.006 | 3.16° |
+| random 00a | `00a231a370` | `05455,05464 → 05458` | 0.206 | 0.399 | 0.179 | 19.75° |
+| random f939 | `f9397af4cb` | `04953,04968 → 04962` | 0.312 | 0.681 | 0.010 | 4.42° |
+| random fd | `fd361ab85f` | `04560,04564 → 04562` | 0.221 | 0.548 | 0.112 | 34.31° |
+
+The final table is generated with `scripts/summarize_triplet_overfits.py` and
+will include camera geometry, cross-context support, target observable fraction,
+full/support PSNR, opacity, depth scale, and convergence slope.
