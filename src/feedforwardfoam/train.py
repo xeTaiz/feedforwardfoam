@@ -52,8 +52,16 @@ def _rgb_loss(prediction: torch.Tensor, target: torch.Tensor, name: str) -> torc
     raise ValueError(f"Unknown RGB loss: {name}")
 
 
-def _metrics(rendered: torch.Tensor, target: torch.Tensor) -> dict[str, float]:
-    mse = F.mse_loss(rendered.clamp(0, 1), target).item()
+def _metrics(
+    rendered: torch.Tensor, target: torch.Tensor, mask: torch.Tensor | None = None
+) -> dict[str, float]:
+    rendered = rendered.clamp(0, 1)
+    if mask is not None:
+        if not mask.any():
+            raise ValueError("Cannot compute support metrics for an empty mask")
+        rendered = rendered[mask]
+        target = target[mask]
+    mse = F.mse_loss(rendered, target).item()
     return {"mse": mse, "psnr": -10.0 * torch.log10(torch.tensor(mse + 1e-10)).item()}
 
 
@@ -245,6 +253,10 @@ def _predict(head, backbone, episode, representation: str, device: torch.device)
     features["depth_alignment_scale"] = alignment.scale[None]
     ray_map = pinhole_ray_map_from_view(episode.context[0], device)
     support = build_canonical_support(images, features, episode.context, device)
+    features["canonical_support_fraction"] = torch.tensor(
+        float(support.maps[:, -1].mean()) if support is not None else 0.0,
+        device=device,
+    )[None]
     if representation == "foam":
         canonical_points = world_points_from_z_depth(
             episode.context[0], features["depth"][:, 0], device
@@ -446,20 +458,28 @@ def train(
         target_views = episode.context if bool(train_cfg.get("target_from_context", False)) else episode.target
         outputs = _render_targets(params, target_views, bridge, representation, device)
         use_mask = bool(train_cfg.get("visibility_mask", False))
-        masks = (
+        report_support = bool(train_cfg.get("report_support_metrics", False)) or use_mask
+        support_context_mode = str(train_cfg.get("support_mask_contexts", "all"))
+        if support_context_mode not in {"all", "canonical"}:
+            raise ValueError("support_mask_contexts must be 'all' or 'canonical'")
+        mask_contexts = (
+            episode.context[:1] if support_context_mode == "canonical" else episode.context
+        )
+        support_masks = (
             [
                 projected_context_support_mask(
-                    episode.context,
-                    features["depth"],
+                    mask_contexts,
+                    features["depth"][:, : len(mask_contexts)],
                     target,
                     device,
                     dilation=int(train_cfg.get("visibility_mask_dilation", 2)),
                 )
                 for target in target_views
             ]
-            if use_mask
+            if report_support
             else None
         )
+        masks = support_masks if use_mask else None
         loss, rgb_loss, alpha_loss = _episode_objective(
             outputs,
             target_views,
@@ -479,6 +499,16 @@ def train(
             _metrics(output.rgb.detach(), view.image.to(device))
             for output, view in zip(outputs, target_views, strict=True)
         ]
+        support_per_target = (
+            [
+                _metrics(output.rgb.detach(), view.image.to(device), mask)
+                for output, view, mask in zip(
+                    outputs, target_views, support_masks, strict=True
+                )
+            ]
+            if support_masks is not None and all(mask.any() for mask in support_masks)
+            else None
+        )
         record = {
             "step": float(step),
             "loss": float(loss.detach()),
@@ -497,12 +527,24 @@ def train(
                 else params.scales.detach().mean()
             ),
             "depth_alignment_scale": float(features["depth_alignment_scale"].mean()),
+            "canonical_support_fraction": float(
+                features["canonical_support_fraction"].mean()
+            ),
             "visibility_mask_fraction": float(
-                torch.stack([mask.float().mean() for mask in masks]).mean()
-                if masks is not None
+                torch.stack([mask.float().mean() for mask in support_masks]).mean()
+                if support_masks is not None
                 else 1.0
             ),
         }
+        if support_per_target is not None:
+            record.update(
+                {
+                    "support_mse": sum(metric["mse"] for metric in support_per_target)
+                    / len(support_per_target),
+                    "support_psnr": sum(metric["psnr"] for metric in support_per_target)
+                    / len(support_per_target),
+                }
+            )
         if val_episodes and step % int(train_cfg["validate_every"]) == 0:
             record.update(
                 _validation(

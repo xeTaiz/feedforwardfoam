@@ -3,7 +3,7 @@ from types import SimpleNamespace
 import torch
 
 from feedforwardfoam.data.types import NvsEpisode, View
-from feedforwardfoam.train import _episode_objective, _triplet_geometry
+from feedforwardfoam.train import _episode_objective, _metrics, _triplet_geometry
 
 
 def _view(value: float) -> View:
@@ -27,6 +27,15 @@ def test_triplet_geometry_detects_midpoint_target():
     assert geometry["target_between_contexts"]
     assert geometry["target_interpolation"] == 0.5
     assert geometry["target_perpendicular_fraction"] == 0.0
+
+
+def test_support_metrics_ignore_pixels_outside_mask():
+    target = torch.zeros(2, 2, 3)
+    prediction = target.clone()
+    prediction[1, 1] = 1.0
+    mask = torch.tensor([[True, True], [True, False]])
+    assert _metrics(prediction, target)["mse"] == 0.25
+    assert _metrics(prediction, target, mask)["mse"] == 0.0
 
 
 def test_multiview_objective_averages_all_target_views():

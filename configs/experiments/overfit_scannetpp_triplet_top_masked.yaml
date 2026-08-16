@@ -1,0 +1,61 @@
+seed: 17
+output_dir: runs/overfit_triplet_top_masked
+backbone:
+  checkpoint: null
+  image_resolution: 80
+  allow_stub_backbone: false
+head:
+  max_cells: 6400
+  num_texel_sites: 8
+  spherical_voronoi_dof: 8
+  hidden_dim: 256
+  radius_mode: pixel_footprint
+  radius_scale_init: 1.25
+  radius_residual_log_scale: 0.25
+  density_mode: fixed
+  fixed_density: 10000.0
+  initialize_rgb_from_image: true
+  initialize_normals_from_depth: true
+  base_depth_mode: predicted
+  point_residual_scale: 0.02
+  normal_residual_radians: 0.25
+  rgb_residual_scale: 1.0
+  fusion_mode: projected
+renderer:
+  render_objective: volume
+  is_pinhole: true
+  bkgd_color:
+  - 0.0
+  - 0.0
+  - 0.0
+data:
+  dataset: scannetpp
+  context_views: 2
+  target_views: 1
+  image_downsample: 1
+  fixed_scene_id: f9397af4cb
+  fixed_split: train
+  context_names:
+  - dslr/resized_undistorted_images/4b1cd91b_DSC04956.JPG
+  - dslr/resized_undistorted_images/4b1cd91b_DSC04970.JPG
+  target_names:
+  - dslr/resized_undistorted_images/4b1cd91b_DSC04962.JPG
+  require_target_between_contexts: true
+  max_perpendicular_fraction: 0.25
+train:
+  steps: 5000
+  learning_rate: 0.0005
+  weight_decay: 0.0
+  rgb_loss: mse
+  alpha_loss_weight: 0.0
+  log_every: 10
+  validate_every: 250
+  checkpoint_every: 250
+  validation_episodes: 0
+  resample_episodes: false
+  target_from_context: false
+  visibility_mask: true
+  visibility_mask_dilation: 2
+  diagnostic_render_every: 250
+  report_support_metrics: true
+  support_mask_contexts: canonical
