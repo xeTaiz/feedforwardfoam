@@ -140,6 +140,53 @@ def test_zero_residual_head_uses_camera_facing_base_geometry_and_centered_rgb():
     assert torch.allclose(actual_rgb[:, 0, 0], expected_rgb, atol=1e-6)
 
 
+def test_decoder_free_initialization_is_independent_of_decoder_weights():
+    first = CanonicalPowerFoamHead(
+        register_dim=8, hidden_dim=16, max_cells=12, prediction_mode="initialization",
+        radius_mode="pixel_footprint", density_mode="fixed", fixed_density=100.0,
+        initialize_rgb_from_image=True,
+    )
+    second = CanonicalPowerFoamHead(
+        register_dim=8, hidden_dim=16, max_cells=12, prediction_mode="initialization",
+        radius_mode="pixel_footprint", density_mode="fixed", fixed_density=100.0,
+        initialize_rgb_from_image=True,
+    )
+    images = torch.rand(1, 1, 3, 3, 4)
+    features = {
+        "depth": torch.full((1, 1, 1, 3, 4), 2.0),
+        "depth_conf": torch.ones(1, 1, 1, 3, 4),
+        "registers": torch.randn(1, 1, 2, 8),
+    }
+    rays = torch.zeros(3, 4, 6)
+    rays[..., 5] = 1.0
+    output_first = first(images, features, rays)
+    output_second = second(images, features, rays)
+    for name, tensor in output_first.as_upstream_tensors().items():
+        assert torch.allclose(tensor, output_second.as_upstream_tensors()[name])
+
+
+def test_absolute_mode_keeps_only_position_initialization():
+    head = CanonicalPowerFoamHead(
+        register_dim=8, hidden_dim=16, max_cells=4, prediction_mode="absolute",
+        radius_mode="pixel_footprint", density_mode="fixed", fixed_density=100.0,
+        initialize_rgb_from_image=True,
+    )
+    images = torch.rand(1, 1, 3, 2, 2)
+    features = {
+        "depth": torch.ones(1, 1, 1, 2, 2),
+        "depth_conf": torch.ones(1, 1, 1, 2, 2),
+        "registers": torch.zeros(1, 1, 2, 8),
+    }
+    rays = torch.zeros(2, 2, 6)
+    rays[..., 5] = 1.0
+    params = head(images, features, rays)
+    # Direct RGB starts centered (rendered as grey upstream), not from source RGB.
+    assert torch.allclose(params.texel_sv_rgb, torch.zeros_like(params.texel_sv_rgb))
+    assert torch.allclose(
+        torch.nn.functional.softplus(params.radii, beta=100), torch.full_like(params.radii, 0.05)
+    )
+
+
 def test_projected_support_fusion_still_decodes_one_foam():
     head = CanonicalPowerFoamHead(
         register_dim=8,

@@ -303,7 +303,7 @@ def _validation(
     }
 
 
-def _checkpoint_state(head, optimizer, step, history, train_dataset, config):
+def _checkpoint_state(head, optimizer, scheduler, step, history, train_dataset, config):
     state = {
         "head": head.state_dict(),
         "optimizer": optimizer.state_dict(),
@@ -313,6 +313,8 @@ def _checkpoint_state(head, optimizer, step, history, train_dataset, config):
         "cuda_rng": torch.cuda.get_rng_state_all(),
         "config": config,
     }
+    if scheduler is not None:
+        state["scheduler"] = scheduler.state_dict()
     if isinstance(train_dataset, MultiSceneScanNetPP):
         state["dataset"] = train_dataset.state_dict()
     elif hasattr(train_dataset, "generator"):
@@ -371,6 +373,13 @@ def train(
             rgb_residual_scale=float(head_cfg.get("rgb_residual_scale", 0.5)),
             fusion_mode=str(head_cfg.get("fusion_mode", "none")),
             patch_token_dim=register_dim,
+            prediction_mode=str(head_cfg.get("prediction_mode", "residual")),
+            enable_point_residual=bool(head_cfg.get("enable_point_residual", True)),
+            enable_radius_residual=bool(head_cfg.get("enable_radius_residual", True)),
+            enable_orientation_residual=bool(
+                head_cfg.get("enable_orientation_residual", True)
+            ),
+            enable_rgb_residual=bool(head_cfg.get("enable_rgb_residual", True)),
         ).to(device)
     elif representation == "gaussian":
         head = CanonicalGaussianHead(
@@ -385,6 +394,17 @@ def train(
         lr=float(config["train"]["learning_rate"]),
         weight_decay=float(config["train"].get("weight_decay", 0.01)),
     )
+    schedule_name = str(config["train"].get("learning_rate_schedule", "constant"))
+    if schedule_name == "constant":
+        scheduler = None
+    elif schedule_name == "cosine":
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer,
+            T_max=int(config["train"]["steps"]),
+            eta_min=float(config["train"].get("min_learning_rate", 1e-6)),
+        )
+    else:
+        raise ValueError("learning_rate_schedule must be 'constant' or 'cosine'")
     output_dir = Path(config["output_dir"])
     output_dir.mkdir(parents=True, exist_ok=True)
     (output_dir / "config.yaml").write_text(yaml.safe_dump(config, sort_keys=True))
@@ -431,6 +451,8 @@ def train(
         state = torch.load(resume, map_location=device, weights_only=False)
         head.load_state_dict(state["head"])
         optimizer.load_state_dict(state["optimizer"])
+        if scheduler is not None and "scheduler" in state:
+            scheduler.load_state_dict(state["scheduler"])
         history = state["history"]
         start_step = int(state["step"]) + 1
         torch.set_rng_state(state["torch_rng"])
@@ -494,6 +516,8 @@ def train(
             head.parameters(), 1.0, error_if_nonfinite=True
         )
         optimizer.step()
+        if scheduler is not None:
+            scheduler.step()
 
         per_target = [
             _metrics(output.rgb.detach(), view.image.to(device))
@@ -515,6 +539,7 @@ def train(
             "rgb_loss": float(rgb_loss.detach()),
             "alpha_loss": float(alpha_loss.detach()),
             "grad_norm": float(grad_norm),
+            "learning_rate": float(optimizer.param_groups[0]["lr"]),
             "target_views": float(len(target_views)),
             "train_psnr": sum(metric["psnr"] for metric in per_target) / len(per_target),
             "train_mse": sum(metric["mse"] for metric in per_target) / len(per_target),
@@ -568,13 +593,15 @@ def train(
             print(json.dumps(record), flush=True)
         if step % int(train_cfg.get("checkpoint_every", train_cfg["validate_every"])) == 0:
             _atomic_save(
-                _checkpoint_state(head, optimizer, step, history, train_dataset, config),
+                _checkpoint_state(head, optimizer, scheduler, step, history, train_dataset, config),
                 output_dir / "latest.pt",
             )
             (output_dir / "metrics.json").write_text(json.dumps(history, indent=2))
 
     _atomic_save(
-        _checkpoint_state(head, optimizer, int(train_cfg["steps"]), history, train_dataset, config),
+        _checkpoint_state(
+            head, optimizer, scheduler, int(train_cfg["steps"]), history, train_dataset, config
+        ),
         output_dir / "final.pt",
     )
     (output_dir / "metrics.json").write_text(json.dumps(history, indent=2))

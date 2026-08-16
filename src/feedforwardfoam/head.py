@@ -129,6 +129,11 @@ class CanonicalPowerFoamHead(nn.Module):
         rgb_residual_scale: float = 0.5,
         fusion_mode: str = "none",
         patch_token_dim: int | None = None,
+        prediction_mode: str = "residual",
+        enable_point_residual: bool = True,
+        enable_radius_residual: bool = True,
+        enable_orientation_residual: bool = True,
+        enable_rgb_residual: bool = True,
     ) -> None:
         super().__init__()
         if radius_mode not in {"learned_absolute", "pixel_footprint"}:
@@ -139,6 +144,8 @@ class CanonicalPowerFoamHead(nn.Module):
             raise ValueError(f"Unknown base depth mode: {base_depth_mode}")
         if fusion_mode not in {"none", "projected"}:
             raise ValueError(f"Unknown fusion mode: {fusion_mode}")
+        if prediction_mode not in {"residual", "absolute", "initialization"}:
+            raise ValueError(f"Unknown prediction mode: {prediction_mode}")
         if fusion_mode == "projected" and patch_token_dim is None:
             raise ValueError("Projected fusion requires patch_token_dim")
         self.max_cells = max_cells
@@ -157,6 +164,11 @@ class CanonicalPowerFoamHead(nn.Module):
         self.normal_residual_radians = normal_residual_radians
         self.rgb_residual_scale = rgb_residual_scale
         self.fusion_mode = fusion_mode
+        self.prediction_mode = prediction_mode
+        self.enable_point_residual = enable_point_residual
+        self.enable_radius_residual = enable_radius_residual
+        self.enable_orientation_residual = enable_orientation_residual
+        self.enable_rgb_residual = enable_rgb_residual
         self.local = nn.Sequential(
             nn.Conv2d(5, hidden_dim, 3, padding=1),
             nn.GELU(),
@@ -268,7 +280,17 @@ class CanonicalPowerFoamHead(nn.Module):
         # with coverage-aware multi-view proposal fusion.
         m = min(self.max_cells, logits.shape[0])
         selected = logits[:, 9].topk(m, sorted=False).indices
+        # Initialization must not depend on random decoder gate weights.
+        if self.prediction_mode == "initialization":
+            selected = torch.arange(m, device=logits.device)
         values = logits[selected]
+        # A decoder-free physical baseline. Selection is deterministic and uses
+        # every pixel when max_cells equals H*W, as in the overfit protocol.
+        if self.prediction_mode == "initialization":
+            # Retain a zero-gradient graph so the common training loop can
+            # evaluate this baseline without a special backward path.
+            values = values * 0.0
+            values[:, 4] = values[:, 4] + 1.0
         ray_map = canonical_ray_map.to(device=values.device, dtype=values.dtype).reshape(-1, 6)
         if ray_map.shape[0] != h * w:
             ray_map = F.interpolate(
@@ -297,7 +319,11 @@ class CanonicalPowerFoamHead(nn.Module):
             base_points = base_points[0].permute(1, 2, 0)
         base_points_selected = base_points.reshape(-1, 3)[selected]
         point_residual = self.point_residual_scale * torch.tanh(values[:, :3])
-        points = base_points_selected + point_residual
+        points = (
+            base_points_selected + point_residual
+            if self.prediction_mode == "residual" and self.enable_point_residual
+            else base_points_selected
+        )
         if self.radius_mode == "pixel_footprint":
             dx = torch.linalg.vector_norm(ray_directions[:, 1:] - ray_directions[:, :-1], dim=-1)
             dy = torch.linalg.vector_norm(ray_directions[1:] - ray_directions[:-1], dim=-1)
@@ -313,10 +339,14 @@ class CanonicalPowerFoamHead(nn.Module):
             counts[1:] += 1
             footprint = depth[0, 0] * footprint / counts.clamp_min(1)
             scale = self.radius_scale_init * torch.exp(
-                self.radius_residual_log_scale * torch.tanh(values[:, 3])
+                self.radius_residual_log_scale
+                * torch.tanh(values[:, 3] if self.enable_radius_residual else torch.zeros_like(values[:, 3]))
             )
             physical_radii = footprint.reshape(-1)[selected].clamp_min(1e-4) * scale
         else:
+            physical_radii = 0.05 * torch.exp(0.5 * torch.tanh(values[:, 3]))
+        if self.prediction_mode == "absolute":
+            # Direct physical radius prediction: no footprint or source-scale prior.
             physical_radii = 0.05 * torch.exp(0.5 * torch.tanh(values[:, 3]))
         radii = inverse_softplus(physical_radii)
 
@@ -340,6 +370,10 @@ class CanonicalPowerFoamHead(nn.Module):
         quaternion = F.normalize(
             quaternion_multiply(residual_quaternion, base_quaternion), dim=-1, eps=1e-6
         )
+        if not self.enable_orientation_residual:
+            quaternion = base_quaternion
+        if self.prediction_mode == "absolute":
+            quaternion = F.normalize(values[:, 4:8], dim=-1, eps=1e-6)
         if self.density_mode == "fixed":
             density = torch.full_like(values[:, 8], self.fixed_density)
         elif self.density_mode == "source_alpha_fixed":
@@ -369,7 +403,12 @@ class CanonicalPowerFoamHead(nn.Module):
             m, self.num_texel_sites, self.spherical_voronoi_dof, 3
         )
         rgb_residual = self.rgb_residual_scale * torch.tanh(rgb_logits)
-        if self.initialize_rgb_from_image:
+        if not self.enable_rgb_residual:
+            rgb_residual = torch.zeros_like(rgb_residual)
+        if self.prediction_mode == "absolute":
+            # Upstream adds +0.5 after spherical-Voronoi interpolation.
+            rgb = 0.5 * torch.tanh(rgb_logits)
+        elif self.initialize_rgb_from_image:
             source_rgb = image[0].permute(1, 2, 0).reshape(-1, 3)[selected]
             rgb = source_rgb[:, None, None] - 0.5 + rgb_residual
         else:
