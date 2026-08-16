@@ -562,12 +562,28 @@ def train(
             ),
         }
         if support_per_target is not None:
+            alpha_threshold = float(train_cfg.get("coverage_alpha_threshold", 0.01))
+            alpha_masks = [output.alpha.detach() > alpha_threshold for output in outputs]
+            intersections = [
+                (alpha_mask & support_mask).float().mean()
+                for alpha_mask, support_mask in zip(alpha_masks, support_masks, strict=True)
+            ]
+            unions = [
+                (alpha_mask | support_mask).float().mean()
+                for alpha_mask, support_mask in zip(alpha_masks, support_masks, strict=True)
+            ]
             record.update(
                 {
                     "support_mse": sum(metric["mse"] for metric in support_per_target)
                     / len(support_per_target),
                     "support_psnr": sum(metric["psnr"] for metric in support_per_target)
                     / len(support_per_target),
+                    "render_coverage_fraction": sum(
+                        float(alpha_mask.float().mean()) for alpha_mask in alpha_masks
+                    )
+                    / len(alpha_masks),
+                    "support_render_iou": float(torch.stack(intersections).mean())
+                    / float(torch.stack(unions).mean().clamp_min(1e-8)),
                 }
             )
         if val_episodes and step % int(train_cfg["validate_every"]) == 0:
