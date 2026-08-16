@@ -136,6 +136,13 @@ def test_build_config_sets_mode_specific_values_and_multiple_target_rule(tmp_pat
     assert "require_target_between_contexts" not in appearance["data"]
 
 
+def test_all_view_proposals_use_all_contexts_for_support_mask(tmp_path):
+    base = _base_config()
+    base["head"]["proposal_views"] = "all"
+    config = build_config(base, _episode(), "full", tmp_path / "all", 10)
+    assert config["train"]["support_mask_contexts"] == "all"
+
+
 def test_shard_episodes_uses_manifest_list_index_modulo_count():
     episodes = [_episode(f"episode-{index}") for index in range(7)]
 

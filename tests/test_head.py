@@ -4,7 +4,10 @@ from feedforwardfoam.fusion import CanonicalSupport
 from feedforwardfoam.head import (
     CanonicalPowerFoamHead,
     depth_normals,
+    concatenate_foam_parameters,
     inverse_softplus,
+    select_foam_parameters,
+    voxel_budget_indices,
 )
 
 
@@ -213,6 +216,28 @@ def test_projected_support_fusion_still_decodes_one_foam():
     params = head(images, features, rays, canonical_support=support)
     assert params.points.shape == (6, 3)
     assert params.texel_sv_rgb.shape == (6, 8, 24)
+
+
+def test_multi_view_parameter_concatenation_and_voxel_budget():
+    head = CanonicalPowerFoamHead(register_dim=8, hidden_dim=16, max_cells=6)
+    images = torch.rand(1, 1, 3, 2, 3)
+    features = {
+        "depth": torch.ones(1, 1, 1, 2, 3),
+        "depth_conf": torch.ones(1, 1, 1, 2, 3),
+        "registers": torch.zeros(1, 1, 2, 8),
+    }
+    rays = torch.zeros(2, 3, 6)
+    rays[..., 3] = torch.linspace(-0.2, 0.2, 3)
+    rays[..., 5] = 1.0
+    first = head(images, features, rays)
+    second = head(images, features, rays)
+    combined = concatenate_foam_parameters([first, second])
+    assert combined.points.shape[0] == 12
+    indices = voxel_budget_indices(combined.points, 6)
+    assert indices.shape == (6,)
+    assert torch.unique(indices).numel() == 6
+    selected = select_foam_parameters(combined, indices)
+    assert all(value.shape[0] == 6 for value in selected.as_upstream_tensors().values())
 
 
 def test_source_alpha_fixed_density_makes_background_cells_empty():

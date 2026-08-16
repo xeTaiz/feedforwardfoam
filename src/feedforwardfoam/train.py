@@ -23,7 +23,12 @@ from .fusion import (
     world_points_from_z_depth,
 )
 from .gaussian import CanonicalGaussianHead, GaussianRendererBridge
-from .head import CanonicalPowerFoamHead
+from .head import (
+    CanonicalPowerFoamHead,
+    concatenate_foam_parameters,
+    select_foam_parameters,
+    voxel_budget_indices,
+)
 from .renderer import (
     PowerFoamRendererBridge,
     camera_from_view,
@@ -241,6 +246,17 @@ def _episode_objective(
     return rgb_loss + alpha_weight * alpha_loss, rgb_loss, alpha_loss
 
 
+def _reorder_context_features(
+    features: dict[str, torch.Tensor], order: list[int], view_count: int
+) -> dict[str, torch.Tensor]:
+    return {
+        name: value[:, order]
+        if value.ndim >= 2 and value.shape[1] == view_count
+        else value
+        for name, value in features.items()
+    }
+
+
 def _predict(head, backbone, episode, representation: str, device: torch.device):
     images = _context_tensor(episode, device)
     with torch.no_grad():
@@ -251,26 +267,92 @@ def _predict(head, backbone, episode, representation: str, device: torch.device)
     aligned_depths, alignment = align_depths_to_calibrated_cameras(features, episode.context)
     features["depth"] = aligned_depths
     features["depth_alignment_scale"] = alignment.scale[None]
-    ray_map = pinhole_ray_map_from_view(episode.context[0], device)
-    support = build_canonical_support(images, features, episode.context, device)
-    features["canonical_support_fraction"] = torch.tensor(
-        float(support.maps[:, -1].mean()) if support is not None else 0.0,
-        device=device,
-    )[None]
-    if representation == "foam":
+
+    proposal_views = getattr(head, "proposal_views", "canonical")
+    if representation != "foam" or proposal_views == "canonical":
+        ray_map = pinhole_ray_map_from_view(episode.context[0], device)
+        support = build_canonical_support(images, features, episode.context, device)
+        features["canonical_support_fraction"] = torch.tensor(
+            float(support.maps[:, -1].mean()) if support is not None else 0.0,
+            device=device,
+        )[None]
+        if representation == "foam":
+            canonical_points = world_points_from_z_depth(
+                episode.context[0], features["depth"][:, 0], device
+            )
+            params = head(
+                images,
+                features,
+                ray_map,
+                episode.context[0].alpha,
+                canonical_support=support,
+                canonical_base_points=canonical_points,
+            )
+        else:
+            params = head(images, features, ray_map)
+        return params, features
+
+    view_count = len(episode.context)
+    if view_count < 2:
+        raise ValueError("All-view proposals require at least two context views")
+    reduction = head.proposal_reduction
+    if reduction == "none":
+        raise ValueError("All-view proposals require all, balanced, or voxel reduction")
+    height, width = episode.context[0].image.shape[:2]
+    per_view_budgets = []
+    for index in range(view_count):
+        if reduction in {"all", "voxel"}:
+            per_view_budgets.append(height * width)
+        else:
+            per_view_budgets.append(
+                head.max_cells // view_count + int(index < head.max_cells % view_count)
+            )
+
+    proposals = []
+    support_fractions = []
+    for canonical_index in range(view_count):
+        order = [canonical_index, *[i for i in range(view_count) if i != canonical_index]]
+        ordered_images = images[:, order]
+        ordered_features = _reorder_context_features(features, order, view_count)
+        ordered_contexts = tuple(episode.context[index] for index in order)
+        support = build_canonical_support(
+            ordered_images, ordered_features, ordered_contexts, device
+        )
+        support_fractions.append(
+            float(support.maps[:, -1].mean()) if support is not None else 0.0
+        )
+        ray_map = pinhole_ray_map_from_view(ordered_contexts[0], device)
         canonical_points = world_points_from_z_depth(
-            episode.context[0], features["depth"][:, 0], device
+            ordered_contexts[0], ordered_features["depth"][:, 0], device
         )
-        params = head(
-            images,
-            features,
-            ray_map,
-            episode.context[0].alpha,
-            canonical_support=support,
-            canonical_base_points=canonical_points,
+        proposals.append(
+            head(
+                ordered_images,
+                ordered_features,
+                ray_map,
+                ordered_contexts[0].alpha,
+                canonical_support=support,
+                canonical_base_points=canonical_points,
+                max_cells_override=per_view_budgets[canonical_index],
+            )
         )
-    else:
-        params = head(images, features, ray_map)
+    params = concatenate_foam_parameters(proposals)
+    if reduction == "voxel":
+        cache_key = (
+            episode.scene_id,
+            *(view.name for view in episode.context),
+            height,
+            width,
+            head.max_cells,
+        )
+        indices = head._proposal_index_cache.get(cache_key)
+        if indices is None:
+            indices = voxel_budget_indices(params.points, head.max_cells).detach().cpu()
+            head._proposal_index_cache[cache_key] = indices
+        params = select_foam_parameters(params, indices.to(params.points.device))
+    features["canonical_support_fraction"] = torch.tensor(
+        sum(support_fractions) / len(support_fractions), device=device
+    )[None]
     return params, features
 
 
@@ -380,6 +462,9 @@ def train(
                 head_cfg.get("enable_orientation_residual", True)
             ),
             enable_rgb_residual=bool(head_cfg.get("enable_rgb_residual", True)),
+            proposal_views=str(head_cfg.get("proposal_views", "canonical")),
+            proposal_reduction=str(head_cfg.get("proposal_reduction", "none")),
+            selection_mode=str(head_cfg.get("selection_mode", "gate")),
         ).to(device)
     elif representation == "gaussian":
         head = CanonicalGaussianHead(

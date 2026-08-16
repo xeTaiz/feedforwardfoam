@@ -139,7 +139,9 @@ def build_config(
         {
             "resample_episodes": False,
             "report_support_metrics": True,
-            "support_mask_contexts": "canonical",
+            "support_mask_contexts": (
+                "all" if head.get("proposal_views", "canonical") == "all" else "canonical"
+            ),
             "visibility_mask": False,
             "learning_rate_schedule": "cosine",
             "learning_rate": 5e-4,

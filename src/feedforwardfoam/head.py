@@ -99,6 +99,72 @@ class FoamParameters:
         }
 
 
+def concatenate_foam_parameters(parameters: list[FoamParameters]) -> FoamParameters:
+    if not parameters:
+        raise ValueError("Cannot concatenate an empty Foam parameter list")
+    return FoamParameters(
+        **{
+            name: torch.cat([getattr(item, name) for item in parameters], dim=0)
+            for name in parameters[0].as_upstream_tensors()
+        }
+    )
+
+
+def select_foam_parameters(parameters: FoamParameters, indices: torch.Tensor) -> FoamParameters:
+    return FoamParameters(
+        **{name: value[indices] for name, value in parameters.as_upstream_tensors().items()}
+    )
+
+
+def voxel_budget_indices(points: torch.Tensor, budget: int, iterations: int = 12) -> torch.Tensor:
+    """Select a deterministic approximately voxel-uniform subset of world points."""
+    count = points.shape[0]
+    if budget <= 0:
+        raise ValueError("Proposal budget must be positive")
+    if count <= budget:
+        return torch.arange(count, device=points.device)
+    detached = points.detach()
+    extent = (detached.amax(dim=0) - detached.amin(dim=0)).amax().clamp_min(1e-6)
+    low = extent / 4096.0
+    high = extent
+    best = torch.arange(count, device=points.device)
+    best_error = count
+    for _ in range(iterations):
+        width = (low + high) * 0.5
+        coordinates = torch.floor((detached - detached.amin(dim=0)) / width).long()
+        _, inverse = torch.unique(coordinates, dim=0, return_inverse=True)
+        order = torch.argsort(inverse, stable=True)
+        sorted_inverse = inverse[order]
+        first = torch.ones_like(sorted_inverse, dtype=torch.bool)
+        first[1:] = sorted_inverse[1:] != sorted_inverse[:-1]
+        representatives = order[first]
+        error = abs(representatives.numel() - budget)
+        if error < best_error:
+            best = representatives
+            best_error = error
+        if representatives.numel() > budget:
+            low = width
+        else:
+            high = width
+    if best.numel() > budget:
+        positions = torch.div(
+            torch.arange(budget, device=points.device) * best.numel(), budget, rounding_mode="floor"
+        )
+        return best[positions]
+    if best.numel() < budget:
+        retained = torch.zeros(count, dtype=torch.bool, device=points.device)
+        retained[best] = True
+        remaining = torch.nonzero(~retained, as_tuple=False)[:, 0]
+        needed = budget - best.numel()
+        positions = torch.div(
+            torch.arange(needed, device=points.device) * remaining.numel(),
+            needed,
+            rounding_mode="floor",
+        )
+        best = torch.cat([best, remaining[positions]])
+    return best
+
+
 class CanonicalPowerFoamHead(nn.Module):
     """P0 canonical-patch decoder for one full Power Foam scene.
 
@@ -134,6 +200,9 @@ class CanonicalPowerFoamHead(nn.Module):
         enable_radius_residual: bool = True,
         enable_orientation_residual: bool = True,
         enable_rgb_residual: bool = True,
+        proposal_views: str = "canonical",
+        proposal_reduction: str = "none",
+        selection_mode: str = "gate",
     ) -> None:
         super().__init__()
         if radius_mode not in {"learned_absolute", "pixel_footprint"}:
@@ -146,6 +215,12 @@ class CanonicalPowerFoamHead(nn.Module):
             raise ValueError(f"Unknown fusion mode: {fusion_mode}")
         if prediction_mode not in {"residual", "absolute", "initialization"}:
             raise ValueError(f"Unknown prediction mode: {prediction_mode}")
+        if proposal_views not in {"canonical", "all"}:
+            raise ValueError(f"Unknown proposal views: {proposal_views}")
+        if proposal_reduction not in {"none", "all", "balanced", "voxel"}:
+            raise ValueError(f"Unknown proposal reduction: {proposal_reduction}")
+        if selection_mode not in {"gate", "uniform"}:
+            raise ValueError(f"Unknown selection mode: {selection_mode}")
         if fusion_mode == "projected" and patch_token_dim is None:
             raise ValueError("Projected fusion requires patch_token_dim")
         self.max_cells = max_cells
@@ -169,6 +244,10 @@ class CanonicalPowerFoamHead(nn.Module):
         self.enable_radius_residual = enable_radius_residual
         self.enable_orientation_residual = enable_orientation_residual
         self.enable_rgb_residual = enable_rgb_residual
+        self.proposal_views = proposal_views
+        self.proposal_reduction = proposal_reduction
+        self.selection_mode = selection_mode
+        self._proposal_index_cache: dict[tuple, torch.Tensor] = {}
         self.local = nn.Sequential(
             nn.Conv2d(5, hidden_dim, 3, padding=1),
             nn.GELU(),
@@ -239,6 +318,7 @@ class CanonicalPowerFoamHead(nn.Module):
         canonical_alpha: torch.Tensor | None = None,
         canonical_support=None,
         canonical_base_points: torch.Tensor | None = None,
+        max_cells_override: int | None = None,
     ) -> FoamParameters:
         """Decode a batch-size-one canonical scene.
 
@@ -278,11 +358,19 @@ class CanonicalPowerFoamHead(nn.Module):
 
         # Deterministic top-M is a P0 budget mechanism; later P1 replaces it
         # with coverage-aware multi-view proposal fusion.
-        m = min(self.max_cells, logits.shape[0])
-        selected = logits[:, 9].topk(m, sorted=False).indices
+        cell_budget = self.max_cells if max_cells_override is None else max_cells_override
+        m = min(cell_budget, logits.shape[0])
+        if self.selection_mode == "uniform":
+            selected = torch.div(
+                torch.arange(m, device=logits.device) * logits.shape[0], m, rounding_mode="floor"
+            )
+        else:
+            selected = logits[:, 9].topk(m, sorted=False).indices
         # Initialization must not depend on random decoder gate weights.
         if self.prediction_mode == "initialization":
-            selected = torch.arange(m, device=logits.device)
+            selected = torch.div(
+                torch.arange(m, device=logits.device) * logits.shape[0], m, rounding_mode="floor"
+            )
         values = logits[selected]
         # A decoder-free physical baseline. Selection is deterministic and uses
         # every pixel when max_cells equals H*W, as in the overfit protocol.
