@@ -1,0 +1,19 @@
+{
+  "description": "One ideal context pair with two distinct held-out targets to distinguish transferable geometry from single-target appearance fitting.",
+  "episodes": [
+    {
+      "id": "f939_two_target",
+      "scene": "f9397af4cb",
+      "context_names": [
+        "dslr/resized_undistorted_images/4b1cd91b_DSC04956.JPG",
+        "dslr/resized_undistorted_images/4b1cd91b_DSC04970.JPG"
+      ],
+      "target_names": [
+        "dslr/resized_undistorted_images/4b1cd91b_DSC04962.JPG",
+        "dslr/resized_undistorted_images/4b1cd91b_DSC04965.JPG"
+      ],
+      "target_interpolations": [0.500181, 0.733550],
+      "target_perpendicular_fractions": [0.006433, 0.021985]
+    }
+  ]
+}
