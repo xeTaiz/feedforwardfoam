@@ -16,6 +16,11 @@ scripts/              # environment/bootstrap commands
 specs/                # research specification
 ```
 
+Research summaries:
+
+- [`docs/experiments/overview.md`](docs/experiments/overview.md) — concise experiments, results, and conclusions;
+- [`docs/references/decoder_design_overview.md`](docs/references/decoder_design_overview.md) — decoder/proposal ideas and recommended progression.
+
 Initialize upstream dependencies after cloning:
 
 ```bash
