@@ -96,6 +96,27 @@ def test_multiscene_split_sampling_and_state_roundtrip(tmp_path):
     assert len(episodes[0].target) == 2
 
 
+def test_native_scannetpp_loads_explicit_named_triplet(tmp_path):
+    scene = _write_native_scene(tmp_path, "named", views=12)
+    dataset = ScanNetPPDataset(
+        scene,
+        split="train",
+        context_views=2,
+        target_views=1,
+        image_resolution=8,
+    )
+    prefix = "dslr/resized_undistorted_images"
+    episode = dataset.episode_from_names(
+        [f"{prefix}/frame_002.JPG", f"{prefix}/frame_008.JPG"],
+        [f"{prefix}/frame_005.JPG"],
+    )
+    assert [view.name for view in episode.context + episode.target] == [
+        f"{prefix}/frame_002.JPG",
+        f"{prefix}/frame_008.JPG",
+        f"{prefix}/frame_005.JPG",
+    ]
+
+
 def test_native_scannetpp_samples_two_contexts_and_separate_target(tmp_path):
     scene = _write_native_scene(tmp_path, "two-context", views=12)
     dataset = ScanNetPPDataset(

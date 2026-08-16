@@ -178,6 +178,26 @@ class ScanNetPPDataset(Dataset[NvsEpisode]):
     def sample_episode(self) -> NvsEpisode:
         return self.episode_from_indices(self._sample_indices(self.generator))
 
+    def _frame_name(self, frame: dict) -> str:
+        if self.native:
+            return str(self._native_image_path(frame).relative_to(self.scene_root))
+        return str(frame["image"])
+
+    def episode_from_names(
+        self, context_names: list[str], target_names: list[str]
+    ) -> NvsEpisode:
+        """Load one explicit, reproducible episode by scene-relative image name."""
+        requested = [str(Path(name)) for name in (*context_names, *target_names)]
+        if len(context_names) != self.context_views or len(target_names) != self.target_views:
+            raise ValueError("Configured names do not match context/target view counts")
+        if len(set(requested)) != len(requested):
+            raise ValueError("Configured context and target names must be distinct")
+        name_to_index = {self._frame_name(frame): index for index, frame in enumerate(self.frames)}
+        missing = [name for name in requested if name not in name_to_index]
+        if missing:
+            raise ValueError(f"Configured ScanNet++ images not found: {missing}")
+        return self.episode_from_indices([name_to_index[name] for name in requested])
+
     def episode_from_indices(self, indices: list[int]) -> NvsEpisode:
         if len(indices) != self.context_views + self.target_views:
             raise ValueError("Episode index count does not match context plus target views")

@@ -2,8 +2,8 @@ from types import SimpleNamespace
 
 import torch
 
-from feedforwardfoam.data.types import View
-from feedforwardfoam.train import _episode_objective
+from feedforwardfoam.data.types import NvsEpisode, View
+from feedforwardfoam.train import _episode_objective, _triplet_geometry
 
 
 def _view(value: float) -> View:
@@ -13,6 +13,20 @@ def _view(value: float) -> View:
         fov_x_radians=0.7,
         name=str(value),
     )
+
+
+def test_triplet_geometry_detects_midpoint_target():
+    context_0 = _view(0.0)
+    context_1 = _view(0.0)
+    target = _view(0.0)
+    context_0.c2w[0, 3] = -1.0
+    context_1.c2w[0, 3] = 1.0
+    geometry = _triplet_geometry(
+        NvsEpisode(context=(context_0, context_1), target=(target,), scene_id="test")
+    )
+    assert geometry["target_between_contexts"]
+    assert geometry["target_interpolation"] == 0.5
+    assert geometry["target_perpendicular_fraction"] == 0.0
 
 
 def test_multiview_objective_averages_all_target_views():

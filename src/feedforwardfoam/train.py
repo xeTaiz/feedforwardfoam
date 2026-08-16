@@ -10,10 +10,12 @@ from typing import Any
 import torch
 import torch.nn.functional as F
 import yaml
+from PIL import Image
 
 from .backbone import FrozenGeometryStub, FrozenVGGTOmega
 from .data.blender import BlenderNvsDataset
 from .data.multiscene import MultiSceneScanNetPP
+from .data.scannetpp import ScanNetPPDataset
 from .fusion import (
     align_depths_to_calibrated_cameras,
     build_canonical_support,
@@ -73,8 +75,18 @@ def _build_datasets(config: dict[str, Any], data_root: Path):
         )
         return train_dataset, None
     if dataset_name == "scannetpp":
-        manifest = Path(data_cfg["scene_manifest"])
         resolution = int(config["backbone"]["image_resolution"])
+        if "fixed_scene_id" in data_cfg:
+            train_dataset = ScanNetPPDataset(
+                data_root / str(data_cfg["fixed_scene_id"]),
+                split=str(data_cfg.get("fixed_split", "train")),
+                context_views=context_views,
+                target_views=target_views,
+                image_resolution=resolution,
+                seed=int(config["seed"]),
+            )
+            return train_dataset, None
+        manifest = Path(data_cfg["scene_manifest"])
         train_dataset = MultiSceneScanNetPP(
             data_root,
             manifest,
@@ -105,6 +117,76 @@ def _sample_episode(dataset, step: int, resample: bool, fixed_episode):
     if isinstance(dataset, MultiSceneScanNetPP):
         return dataset.sample_episode() if resample else fixed_episode
     return dataset[step % len(dataset)] if resample else fixed_episode
+
+
+def _configured_fixed_episode(dataset, config: dict[str, Any]):
+    data_cfg = config["data"]
+    context_names = data_cfg.get("context_names")
+    target_names = data_cfg.get("target_names")
+    if context_names is None and target_names is None:
+        return None
+    if not isinstance(dataset, ScanNetPPDataset):
+        raise ValueError("Explicit context_names/target_names require a fixed ScanNet++ scene")
+    if context_names is None or target_names is None:
+        raise ValueError("Both context_names and target_names must be configured")
+    return dataset.episode_from_names(list(context_names), list(target_names))
+
+
+def _triplet_geometry(episode) -> dict[str, Any]:
+    if len(episode.context) != 2 or len(episode.target) != 1:
+        return {}
+    centers = [view.c2w[:3, 3] for view in (*episode.context, *episode.target)]
+    c0, c1, target = centers
+    segment = c1 - c0
+    baseline = torch.linalg.vector_norm(segment).clamp_min(1e-8)
+    interpolation = torch.dot(target - c0, segment) / baseline.square()
+    closest = c0 + interpolation * segment
+    forwards = [-view.c2w[:3, 2] for view in (*episode.context, *episode.target)]
+
+    def angle_degrees(first: torch.Tensor, second: torch.Tensor) -> float:
+        cosine = F.cosine_similarity(first[None], second[None]).clamp(-1, 1)
+        return float(torch.rad2deg(torch.acos(cosine))[0])
+
+    return {
+        "scene_id": episode.scene_id,
+        "context_names": [view.name for view in episode.context],
+        "target_names": [view.name for view in episode.target],
+        "context_baseline": float(baseline),
+        "target_interpolation": float(interpolation),
+        "target_perpendicular_distance": float(torch.linalg.vector_norm(target - closest)),
+        "target_perpendicular_fraction": float(
+            torch.linalg.vector_norm(target - closest) / baseline
+        ),
+        "context_target_distances": [
+            float(torch.linalg.vector_norm(target - c0)),
+            float(torch.linalg.vector_norm(target - c1)),
+        ],
+        "view_angle_degrees": {
+            "context_context": angle_degrees(forwards[0], forwards[1]),
+            "context0_target": angle_degrees(forwards[0], forwards[2]),
+            "context1_target": angle_degrees(forwards[1], forwards[2]),
+        },
+        "target_between_contexts": bool(0.0 <= interpolation <= 1.0),
+    }
+
+
+def _save_diagnostic_images(output_dir: Path, step: int, episode, outputs) -> None:
+    snapshot_dir = output_dir / "diagnostic_renders" / f"step_{step:06d}"
+    snapshot_dir.mkdir(parents=True, exist_ok=True)
+
+    def save_tensor(tensor: torch.Tensor, path: Path) -> None:
+        array = (
+            tensor.detach().clamp(0, 1).mul(255).round().to(torch.uint8).cpu().numpy()
+        )
+        Image.fromarray(array).save(path)
+
+    for index, view in enumerate(episode.context):
+        save_tensor(view.image, snapshot_dir / f"context_{index}.png")
+    for index, (view, output) in enumerate(zip(episode.target, outputs, strict=True)):
+        target = view.image.to(output.rgb.device)
+        save_tensor(view.image, snapshot_dir / f"target_{index}.png")
+        save_tensor(output.rgb, snapshot_dir / f"prediction_{index}.png")
+        save_tensor((output.rgb - target).abs(), snapshot_dir / f"error_{index}.png")
 
 
 def _render_targets(params, target_views, bridge, representation: str, device: torch.device):
@@ -295,7 +377,21 @@ def train(
     output_dir.mkdir(parents=True, exist_ok=True)
     (output_dir / "config.yaml").write_text(yaml.safe_dump(config, sort_keys=True))
 
-    initial_episode = _sample_episode(train_dataset, 0, True, None)
+    configured_episode = _configured_fixed_episode(train_dataset, config)
+    initial_episode = configured_episode or _sample_episode(train_dataset, 0, True, None)
+    geometry = _triplet_geometry(initial_episode)
+    if geometry:
+        (output_dir / "triplet_geometry.json").write_text(json.dumps(geometry, indent=2))
+        print(json.dumps({"triplet_geometry": geometry}), flush=True)
+        data_cfg = config["data"]
+        if bool(data_cfg.get("require_target_between_contexts", False)):
+            max_perpendicular = float(data_cfg.get("max_perpendicular_fraction", 0.25))
+            if not geometry["target_between_contexts"]:
+                raise ValueError("Configured target camera is not between context cameras")
+            if geometry["target_perpendicular_fraction"] > max_perpendicular:
+                raise ValueError(
+                    "Configured target camera is too far from the context-camera segment"
+                )
     if representation == "foam":
         reference_camera = camera_from_view(initial_episode.context[0], device)
         bridge = PowerFoamRendererBridge(
@@ -335,6 +431,8 @@ def train(
     train_cfg = config["train"]
     fixed_episode = initial_episode
     resample = bool(train_cfg.get("resample_episodes", True))
+    if configured_episode is not None and resample:
+        raise ValueError("Explicit fixed episodes require train.resample_episodes: false")
     val_episodes = (
         val_dataset.fixed_episodes(
             int(train_cfg.get("validation_episodes", 4)), int(config["seed"]) + 20_000
@@ -417,6 +515,13 @@ def train(
                 )
             )
         history.append(record)
+        diagnostic_every = int(train_cfg.get("diagnostic_render_every", 0))
+        if (
+            diagnostic_every > 0
+            and step % diagnostic_every == 0
+            and not bool(train_cfg.get("target_from_context", False))
+        ):
+            _save_diagnostic_images(output_dir, step, episode, outputs)
         if step % int(train_cfg["log_every"]) == 0:
             print(json.dumps(record), flush=True)
         if step % int(train_cfg.get("checkpoint_every", train_cfg["validate_every"])) == 0:
