@@ -474,6 +474,10 @@ def train(
         if val_dataset is not None
         else ()
     )
+    best_full_psnr = max((record.get("train_psnr", float("-inf")) for record in history), default=float("-inf"))
+    best_support_psnr = max(
+        (record.get("support_psnr", float("-inf")) for record in history), default=float("-inf")
+    )
     for step in range(start_step, int(train_cfg["steps"]) + 1):
         episode = _sample_episode(train_dataset, step, resample, fixed_episode)
         params, features = _predict(head, backbone, episode, representation, device)
@@ -598,6 +602,18 @@ def train(
                 )
             )
         history.append(record)
+        if record["train_psnr"] > best_full_psnr:
+            best_full_psnr = record["train_psnr"]
+            _atomic_save(
+                _checkpoint_state(head, optimizer, scheduler, step, history, train_dataset, config),
+                output_dir / "best_full.pt",
+            )
+        if record.get("support_psnr", float("-inf")) > best_support_psnr:
+            best_support_psnr = record["support_psnr"]
+            _atomic_save(
+                _checkpoint_state(head, optimizer, scheduler, step, history, train_dataset, config),
+                output_dir / "best_support.pt",
+            )
         diagnostic_every = int(train_cfg.get("diagnostic_render_every", 0))
         if (
             diagnostic_every > 0
