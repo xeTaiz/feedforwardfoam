@@ -19,7 +19,8 @@ specs/                # research specification
 Research summaries:
 
 - [`docs/experiments/overview.md`](docs/experiments/overview.md) — concise experiments, results, and conclusions;
-- [`docs/references/decoder_design_overview.md`](docs/references/decoder_design_overview.md) — decoder/proposal ideas and recommended progression.
+- [`docs/references/decoder_design_overview.md`](docs/references/decoder_design_overview.md) — decoder/proposal ideas and recommended progression;
+- [`docs/HANDOFF.md`](docs/HANDOFF.md) — full handoff document with all recent experiments, results, decisions, environment, and next steps for another agent.
 
 Initialize upstream dependencies after cloning:
 
