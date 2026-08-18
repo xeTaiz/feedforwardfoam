@@ -72,20 +72,26 @@ quantiles, not overlap quantiles. Measured `obs` is non-monotonic in `q`
 `q` axis as an overlap axis, and do not derive a sampling policy from it. Bin on
 measured quantities directly.
 
-## 5. Planned long-run shape (to be revised after the reduction arm is chosen)
+## 5. Planned long-run shape
 
 - Scene-disjoint split across the largest verified scene set.
 - Overlap-aware sampling from the calibrated manifest: reject near-empty coverage
   and near-degenerate parallax; balance the remaining bins.
-- Reduction arm: whichever arm wins the current single-scene/few-scene study;
-  arm A (all-proposal concatenation, no reduction) is the fallback default since
-  it currently leads.
+- Reduction arm: arm A (all-proposal concatenation, no reduction). Arms B–E are
+  all worse at a reduced budget, and the two world-space follow-ups (D fps,
+  E confidence voxel) were measured and rejected — see
+  `docs/experiments/proposal_reduction_arms.md`. Revisit only if a pixel-space
+  reduction arm beats arm B.
 - Retain `best_full.pt` / `best_support.pt`; cosine LR.
 
 ## 6. Scale-up readiness checks still outstanding
 
-- Depth-gauge scale logging, including a count of runs hitting the `[0.25, 4]`
-  bounds.
+- **Depth-gauge saturation is confirmed and material.** On the 12 stratified
+  triplets, 4 of 12 end with `depth_alignment_scale` pinned at the upper bound
+  4.0000 (`00a_q90`, `f939_q05`, `f939_q60`, `fd_q30`), and two more exceed 2.5.
+  The predicted/calibrated baseline ratio leaves the assumed `[0.25, 4]` range
+  for a third of the matrix. Diagnose before scale-up; a clipped gauge silently
+  mis-scales every proposal in those episodes.
 - Fixed validation bins by measured overlap / angle / coverage.
 - Visualization bundles for best checkpoints.
 - Registers-only two-context control on the stratified set. Section 5.7 tabulates

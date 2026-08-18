@@ -350,8 +350,8 @@ python scripts/select_scannetpp_triplet.py \
 - **Native ScanNet++ loader** rejects off-center principal points or non-square pixels. Center-crops 1752×1168 → 1168² before resize. Only `PINHOLE` cameras.
 - **`episode_from_names`** expects scene-relative image paths including the `dslr/resized_undistorted_images/` prefix.
 - **Mask empty fallback:** an all-zero support mask falls back to full-frame loss rather than dropping the step.
-- **`select_foam_parameters`** expects a CPU or GPU `torch.Tensor` of indices. Voxel-selection cache is keyed by `(scene_id, *context_names, H, W, budget)` so it's deterministic per fixed episode.
-- **Worker checkout `/code/feedforwardfoam-abc`**: a separate clone used during the queued runs to avoid touching `/code/feedforwardfoam-project`. Symlinks the two external submodule directories so packages resolve.
+- **`select_foam_parameters`** expects a CPU or GPU `torch.Tensor` of indices. The proposal-selection cache is keyed by `(reduction, scene_id, *context_names, H, W, budget)` so it's deterministic per fixed episode and cannot be shared between reduction arms.
+- **Worker checkout `/code/feedforwardfoam-abc`**: a separate clone used during the queued runs to avoid touching `/code/feedforwardfoam-project`. Symlinks the two external submodule directories so packages resolve. **`git reset --hard` destroys those symlinks** and replaces them with empty submodule directories, producing `ModuleNotFoundError: No module named 'vggt_omega'`. Re-link after every reset: `cd external && rmdir vggt-omega powerfoam && ln -sfn /code/feedforwardfoam-project/external/vggt-omega vggt-omega && ln -sfn /code/feedforwardfoam-project/external/powerfoam powerfoam`.
 
 ## 14. Documentation index
 
@@ -361,7 +361,9 @@ Concise (start here):
 - `docs/experiments/foam_initialization_and_ablation.md` — initialization/absolute/residual ablations
 - `docs/experiments/scannetpp_two_context_progress.md` — stability gate + multi-scene two-context
 - `docs/experiments/scannetpp_multiview_progress.md` — 1/2/4/8 target supervision
-- `docs/experiments/stratified_and_proposal_matrix.md` — stratified + two-target + A/B/C queue
+- `docs/experiments/stratified_and_proposal_matrix.md` — stratified + two-target + A/B/C/D/E queue
+- `docs/experiments/proposal_reduction_arms.md` — **A/B/C/D/E reduction results; fps and confidence-voxel rejected**
+- `docs/experiments/scale_up_plan.md` — parked long-run plan, worker/data inventory, obs-proxy calibration prerequisite
 - `docs/references/decoder_design_overview.md` — concise decoder/proposal ideas
 
 Detailed logs:
