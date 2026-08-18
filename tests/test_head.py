@@ -5,8 +5,10 @@ from feedforwardfoam.head import (
     CanonicalPowerFoamHead,
     depth_normals,
     concatenate_foam_parameters,
+    farthest_point_indices,
     inverse_softplus,
     select_foam_parameters,
+    uniform_selection_indices,
     voxel_budget_indices,
 )
 
@@ -238,6 +240,50 @@ def test_multi_view_parameter_concatenation_and_voxel_budget():
     assert torch.unique(indices).numel() == 6
     selected = select_foam_parameters(combined, indices)
     assert all(value.shape[0] == 6 for value in selected.as_upstream_tensors().values())
+
+
+def test_uniform_selection_indices_are_evenly_strided():
+    indices = uniform_selection_indices(6, 3, torch.device("cpu"))
+    assert indices.tolist() == [0, 2, 4]
+
+
+def test_farthest_point_selection_keeps_isolated_proposals():
+    cluster = torch.zeros(64, 3)
+    cluster[:, 0] = torch.linspace(0.0, 0.01, 64)
+    isolated = torch.tensor([[5.0, 0.0, 0.0], [0.0, 5.0, 0.0], [0.0, 0.0, 5.0]])
+    points = torch.cat([cluster, isolated])
+
+    indices = farthest_point_indices(points, 4)
+
+    assert indices.shape == (4,)
+    assert torch.unique(indices).numel() == 4
+    # A dense cluster must not crowd out the three isolated proposals.
+    assert {64, 65, 66}.issubset(set(indices.tolist()))
+
+
+def test_confidence_scores_replace_the_first_in_voxel_representative():
+    points = torch.tensor(
+        [[0.0, 0.0, 0.0], [0.001, 0.0, 0.0], [3.0, 0.0, 0.0], [3.001, 0.0, 0.0]]
+    )
+    scores = torch.tensor([0.1, 0.9, 0.2, 0.8])
+
+    unweighted = voxel_budget_indices(points, 2)
+    weighted = voxel_budget_indices(points, 2, scores=scores)
+
+    # Without scores the lowest index in each voxel wins, which is a bias
+    # toward whichever context view was concatenated first.
+    assert unweighted.tolist() == [0, 2]
+    assert weighted.tolist() == [1, 3]
+
+
+def test_confidence_scores_must_match_the_proposal_count():
+    points = torch.rand(8, 3)
+    try:
+        voxel_budget_indices(points, 4, scores=torch.rand(7))
+    except ValueError as error:
+        assert "match the proposal count" in str(error)
+    else:
+        raise AssertionError("Mismatched scores must raise")
 
 
 def test_source_alpha_fixed_density_makes_background_cells_empty():

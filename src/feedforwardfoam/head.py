@@ -116,14 +116,69 @@ def select_foam_parameters(parameters: FoamParameters, indices: torch.Tensor) ->
     )
 
 
-def voxel_budget_indices(points: torch.Tensor, budget: int, iterations: int = 12) -> torch.Tensor:
-    """Select a deterministic approximately voxel-uniform subset of world points."""
+def uniform_selection_indices(count: int, budget: int, device: torch.device) -> torch.Tensor:
+    """Return a deterministic evenly strided subset of ``count`` items."""
+    if budget <= 0:
+        raise ValueError("Selection budget must be positive")
+    selected = min(budget, count)
+    return torch.div(
+        torch.arange(selected, device=device) * count, selected, rounding_mode="floor"
+    )
+
+
+def farthest_point_indices(
+    points: torch.Tensor, budget: int, start_index: int = 0
+) -> torch.Tensor:
+    """Select a deterministic farthest-point subset of world points.
+
+    Voxel selection keeps one member per occupied cell and therefore drops
+    isolated proposals such as depth-edge anchors. Farthest-point sampling
+    maximizes spatial spread instead, so thin structure survives reduction.
+    """
     count = points.shape[0]
     if budget <= 0:
         raise ValueError("Proposal budget must be positive")
     if count <= budget:
         return torch.arange(count, device=points.device)
     detached = points.detach()
+    selected = torch.empty(budget, dtype=torch.long, device=points.device)
+    squared = torch.full((count,), float("inf"), device=points.device, dtype=detached.dtype)
+    current = int(start_index)
+    for position in range(budget):
+        selected[position] = current
+        squared = torch.minimum(squared, (detached - detached[current]).square().sum(dim=-1))
+        # Negative marking keeps an already chosen point out of every later argmax.
+        squared[current] = -1.0
+        current = int(torch.argmax(squared))
+    return selected
+
+
+def voxel_budget_indices(
+    points: torch.Tensor,
+    budget: int,
+    iterations: int = 12,
+    scores: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Select a deterministic approximately voxel-uniform subset of world points.
+
+    Without ``scores`` an occupied voxel is represented by its lowest-index
+    member, which biases selection toward whichever context view was
+    concatenated first. With ``scores`` the highest-scoring member represents
+    the voxel instead. The voxel grid, the budget bisection, and the trim/fill
+    steps are identical either way, so ``scores`` changes only which member of
+    a voxel survives.
+    """
+    count = points.shape[0]
+    if budget <= 0:
+        raise ValueError("Proposal budget must be positive")
+    if count <= budget:
+        return torch.arange(count, device=points.device)
+    detached = points.detach()
+    score_order: torch.Tensor | None = None
+    if scores is not None:
+        if scores.shape[0] != count:
+            raise ValueError("Proposal scores must match the proposal count")
+        score_order = torch.argsort(-scores.detach().reshape(-1), stable=True)
     extent = (detached.amax(dim=0) - detached.amin(dim=0)).amax().clamp_min(1e-6)
     low = extent / 4096.0
     high = extent
@@ -133,7 +188,10 @@ def voxel_budget_indices(points: torch.Tensor, budget: int, iterations: int = 12
         width = (low + high) * 0.5
         coordinates = torch.floor((detached - detached.amin(dim=0)) / width).long()
         _, inverse = torch.unique(coordinates, dim=0, return_inverse=True)
-        order = torch.argsort(inverse, stable=True)
+        if score_order is None:
+            order = torch.argsort(inverse, stable=True)
+        else:
+            order = score_order[torch.argsort(inverse[score_order], stable=True)]
         sorted_inverse = inverse[order]
         first = torch.ones_like(sorted_inverse, dtype=torch.bool)
         first[1:] = sorted_inverse[1:] != sorted_inverse[:-1]
@@ -217,7 +275,7 @@ class CanonicalPowerFoamHead(nn.Module):
             raise ValueError(f"Unknown prediction mode: {prediction_mode}")
         if proposal_views not in {"canonical", "all"}:
             raise ValueError(f"Unknown proposal views: {proposal_views}")
-        if proposal_reduction not in {"none", "all", "balanced", "voxel"}:
+        if proposal_reduction not in {"none", "all", "balanced", "voxel", "fps", "confidence_voxel"}:
             raise ValueError(f"Unknown proposal reduction: {proposal_reduction}")
         if selection_mode not in {"gate", "uniform"}:
             raise ValueError(f"Unknown selection mode: {selection_mode}")
@@ -360,17 +418,11 @@ class CanonicalPowerFoamHead(nn.Module):
         # with coverage-aware multi-view proposal fusion.
         cell_budget = self.max_cells if max_cells_override is None else max_cells_override
         m = min(cell_budget, logits.shape[0])
-        if self.selection_mode == "uniform":
-            selected = torch.div(
-                torch.arange(m, device=logits.device) * logits.shape[0], m, rounding_mode="floor"
-            )
+        # Initialization must not depend on random decoder gate weights.
+        if self.selection_mode == "uniform" or self.prediction_mode == "initialization":
+            selected = uniform_selection_indices(logits.shape[0], m, logits.device)
         else:
             selected = logits[:, 9].topk(m, sorted=False).indices
-        # Initialization must not depend on random decoder gate weights.
-        if self.prediction_mode == "initialization":
-            selected = torch.div(
-                torch.arange(m, device=logits.device) * logits.shape[0], m, rounding_mode="floor"
-            )
         values = logits[selected]
         # A decoder-free physical baseline. Selection is deterministic and uses
         # every pixel when max_cells equals H*W, as in the overfit protocol.

@@ -26,7 +26,9 @@ from .gaussian import CanonicalGaussianHead, GaussianRendererBridge
 from .head import (
     CanonicalPowerFoamHead,
     concatenate_foam_parameters,
+    farthest_point_indices,
     select_foam_parameters,
+    uniform_selection_indices,
     voxel_budget_indices,
 )
 from .renderer import (
@@ -257,6 +259,27 @@ def _reorder_context_features(
     }
 
 
+def _proposal_confidence(
+    features: dict[str, torch.Tensor], height: int, width: int, budget: int
+) -> torch.Tensor:
+    """Frozen depth confidence per proposal, ordered like the head's cells.
+
+    The head decodes canonical-view pixels in raster order and reduces them
+    with the same uniform stride, so applying that stride here keeps scores
+    aligned with the cells they describe.
+    """
+    confidence = features["depth_conf"][:, 0]
+    if confidence.ndim == 3:
+        confidence = confidence[:, None]
+    if confidence.shape[-2:] != (height, width):
+        confidence = F.interpolate(
+            confidence, size=(height, width), mode="bilinear", align_corners=False
+        )
+    flat = confidence.reshape(-1)
+    return flat[uniform_selection_indices(flat.shape[0], budget, flat.device)]
+
+
+
 def _predict(head, backbone, episode, representation: str, device: torch.device):
     images = _context_tensor(episode, device)
     with torch.no_grad():
@@ -297,11 +320,22 @@ def _predict(head, backbone, episode, representation: str, device: torch.device)
         raise ValueError("All-view proposals require at least two context views")
     reduction = head.proposal_reduction
     if reduction == "none":
-        raise ValueError("All-view proposals require all, balanced, or voxel reduction")
+        raise ValueError(
+            "All-view proposals require all, balanced, voxel, fps, or "
+            "confidence_voxel reduction"
+        )
+    if reduction == "confidence_voxel" and not (
+        head.selection_mode == "uniform" or head.prediction_mode == "initialization"
+    ):
+        raise ValueError(
+            "confidence_voxel reduction requires uniform selection so proposal "
+            "scores stay aligned with decoded cells"
+        )
     height, width = episode.context[0].image.shape[:2]
+    full_budget_reductions = {"all", "voxel", "fps", "confidence_voxel"}
     per_view_budgets = []
     for index in range(view_count):
-        if reduction in {"all", "voxel"}:
+        if reduction in full_budget_reductions:
             per_view_budgets.append(height * width)
         else:
             per_view_budgets.append(
@@ -310,6 +344,7 @@ def _predict(head, backbone, episode, representation: str, device: torch.device)
 
     proposals = []
     support_fractions = []
+    proposal_scores = []
     for canonical_index in range(view_count):
         order = [canonical_index, *[i for i in range(view_count) if i != canonical_index]]
         ordered_images = images[:, order]
@@ -336,9 +371,16 @@ def _predict(head, backbone, episode, representation: str, device: torch.device)
                 max_cells_override=per_view_budgets[canonical_index],
             )
         )
+        if reduction == "confidence_voxel":
+            proposal_scores.append(
+                _proposal_confidence(
+                    ordered_features, height, width, per_view_budgets[canonical_index]
+                )
+            )
     params = concatenate_foam_parameters(proposals)
-    if reduction == "voxel":
+    if reduction in {"voxel", "fps", "confidence_voxel"}:
         cache_key = (
+            reduction,
             episode.scene_id,
             *(view.name for view in episode.context),
             height,
@@ -347,7 +389,15 @@ def _predict(head, backbone, episode, representation: str, device: torch.device)
         )
         indices = head._proposal_index_cache.get(cache_key)
         if indices is None:
-            indices = voxel_budget_indices(params.points, head.max_cells).detach().cpu()
+            if reduction == "voxel":
+                indices = voxel_budget_indices(params.points, head.max_cells)
+            elif reduction == "fps":
+                indices = farthest_point_indices(params.points, head.max_cells)
+            else:
+                indices = voxel_budget_indices(
+                    params.points, head.max_cells, scores=torch.cat(proposal_scores)
+                )
+            indices = indices.detach().cpu()
             head._proposal_index_cache[cache_key] = indices
         params = select_foam_parameters(params, indices.to(params.points.device))
     features["canonical_support_fraction"] = torch.tensor(

@@ -1,9 +1,12 @@
 from types import SimpleNamespace
 
+import pytest
 import torch
 
+from feedforwardfoam.backbone import FrozenGeometryStub
 from feedforwardfoam.data.types import NvsEpisode, View
-from feedforwardfoam.train import _episode_objective, _metrics, _triplet_geometry
+from feedforwardfoam.head import CanonicalPowerFoamHead
+from feedforwardfoam.train import _episode_objective, _metrics, _predict, _triplet_geometry
 
 
 def _view(value: float) -> View:
@@ -57,3 +60,86 @@ def test_multiview_objective_averages_all_target_views():
     assert torch.allclose(rgb_loss, expected)
     assert torch.allclose(loss, expected)
     assert alpha_loss == 0
+
+
+class _StubBackboneWithCameras(torch.nn.Module):
+    """Geometry stub plus the predicted cameras depth alignment requires."""
+
+    def __init__(self, register_dim: int) -> None:
+        super().__init__()
+        self.stub = FrozenGeometryStub(register_dim=register_dim, register_count=2)
+
+    def forward(self, images: torch.Tensor) -> dict[str, torch.Tensor]:
+        features = dict(self.stub(images))
+        view_count = images.shape[1]
+        extrinsics = torch.eye(4).expand(1, view_count, 4, 4).clone()
+        for index in range(view_count):
+            # World-to-camera translation of a camera centred at x = index.
+            extrinsics[0, index, 0, 3] = -float(index)
+        features["predicted_extrinsics"] = extrinsics
+        return features
+
+
+def _posed_view(name: str, offset: float, seed: int) -> View:
+    generator = torch.Generator().manual_seed(seed)
+    c2w = torch.eye(4)
+    c2w[0, 3] = offset
+    return View(
+        image=torch.rand(4, 4, 3, generator=generator),
+        c2w=c2w,
+        fov_x_radians=0.7,
+        name=name,
+    )
+
+
+def _proposal_episode() -> NvsEpisode:
+    return NvsEpisode(
+        context=(_posed_view("c0", 0.0, 1), _posed_view("c1", 0.5, 2)),
+        target=(_posed_view("t0", 0.25, 3),),
+        scene_id="stub_scene",
+    )
+
+
+def _proposal_head(reduction: str, selection_mode: str = "uniform") -> CanonicalPowerFoamHead:
+    return CanonicalPowerFoamHead(
+        register_dim=8,
+        hidden_dim=16,
+        max_cells=8,
+        proposal_views="all",
+        proposal_reduction=reduction,
+        selection_mode=selection_mode,
+    )
+
+
+@pytest.mark.parametrize("reduction", ["voxel", "fps", "confidence_voxel"])
+def test_proposal_reductions_emit_exactly_the_cell_budget(reduction):
+    head = _proposal_head(reduction)
+    params, _ = _predict(
+        head,
+        _StubBackboneWithCameras(register_dim=8),
+        _proposal_episode(),
+        "foam",
+        torch.device("cpu"),
+    )
+    assert all(value.shape[0] == 8 for value in params.as_upstream_tensors().values())
+
+
+def test_reduction_arms_do_not_share_cached_selections():
+    episode = _proposal_episode()
+    backbone = _StubBackboneWithCameras(register_dim=8)
+    for reduction in ("voxel", "fps"):
+        head = _proposal_head(reduction)
+        _predict(head, backbone, episode, "foam", torch.device("cpu"))
+        assert all(key[0] == reduction for key in head._proposal_index_cache)
+
+
+def test_confidence_voxel_rejects_gate_selection_that_misaligns_scores():
+    head = _proposal_head("confidence_voxel", selection_mode="gate")
+    with pytest.raises(ValueError, match="uniform selection"):
+        _predict(
+            head,
+            _StubBackboneWithCameras(register_dim=8),
+            _proposal_episode(),
+            "foam",
+            torch.device("cpu"),
+        )
