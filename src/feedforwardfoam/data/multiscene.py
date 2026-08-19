@@ -18,6 +18,7 @@ class EpisodeEntry(TypedDict):
     target_names: list[str]
     bin: str
 
+
 class MultiSceneScanNetPP:
     """Sample either scenes or preselected episodes from scene-disjoint splits."""
 
@@ -159,13 +160,9 @@ class MultiSceneScanNetPP:
             ]
         return state
 
-    def load_state_dict(
-        self, state: dict[str, torch.Tensor | list[torch.Tensor]]
-    ) -> None:
+    def load_state_dict(self, state: dict[str, torch.Tensor | list[torch.Tensor]]) -> None:
         _ = self.generator.set_state(cast(torch.Tensor, state["scene_generator"]))
         if self.episode_entries is None:
             generator_states = cast(list[torch.Tensor], state["dataset_generators"])
-            for dataset, generator_state in zip(
-                self.datasets, generator_states, strict=True
-            ):
+            for dataset, generator_state in zip(self.datasets, generator_states, strict=True):
                 _ = dataset.generator.set_state(generator_state)

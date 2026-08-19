@@ -3,6 +3,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+import feedforwardfoam.train as train_module
 from feedforwardfoam.backbone import FrozenGeometryStub
 from feedforwardfoam.data.types import NvsEpisode, View
 from feedforwardfoam.head import CanonicalPowerFoamHead
@@ -179,3 +180,73 @@ def test_incremental_merge_is_weaker_under_the_power_criterion():
     power = _incremental_cells(proposal_containment="power", proposal_containment_tolerance=1.0)
     ball = _incremental_cells(proposal_containment="ball", proposal_containment_tolerance=1.0)
     assert power >= ball
+
+
+def _validation_episode(prediction: float, scene_id: str) -> NvsEpisode:
+    target = View(
+        image=torch.zeros(2, 2, 3),
+        c2w=torch.eye(4),
+        fov_x_radians=0.7,
+        name=str(prediction),
+    )
+    return NvsEpisode(context=(_view(0.0), _view(0.0)), target=(target,), scene_id=scene_id)
+
+
+def test_validation_aggregates_fixed_bins_and_counts_each_render_once(monkeypatch):
+    def fake_predict(*_args, **_kwargs):
+        return None, {
+            "depth": torch.ones(1, 2, 1, 2, 2),
+            "depth_alignment_bound_hit": torch.zeros(1),
+        }
+
+    def fake_render(_params, targets, _bridge, _representation, _device):
+        return [
+            SimpleNamespace(
+                rgb=torch.full((2, 2, 3), float(target.name)),
+                alpha=torch.ones(2, 2),
+            )
+            for target in targets
+        ]
+
+    monkeypatch.setattr(train_module, "_predict", fake_predict)
+    monkeypatch.setattr(train_module, "_render_targets", fake_render)
+    monkeypatch.setattr(
+        train_module,
+        "projected_context_support_mask",
+        lambda *_args, **_kwargs: torch.ones(2, 2, dtype=torch.bool),
+    )
+    records = (
+        ("low_angle", _validation_episode(0.1, "low")),
+        ("mid_angle", _validation_episode(0.3, "mid")),
+    )
+    metrics = train_module._validation(
+        records,
+        head=None,
+        backbone=None,
+        bridge=None,
+        representation="foam",
+        device=torch.device("cpu"),
+        support_context_mode="all",
+        support_dilation=2,
+    )
+    assert metrics["val_renders"] == 2
+    assert metrics["val_mse"] == pytest.approx((0.1**2 + 0.3**2) / 2)
+    assert metrics["val_mse_low_angle"] == pytest.approx(0.1**2)
+    assert metrics["val_mse_mid_angle"] == pytest.approx(0.3**2)
+    assert metrics["val_psnr"] == pytest.approx(
+        -10.0 * torch.log10(torch.tensor((0.1**2 + 0.3**2) / 2)).item()
+    )
+    assert metrics["val_support_psnr"] == pytest.approx(metrics["val_psnr"])
+
+    all_metrics = train_module._validation(
+        (("all", _validation_episode(0.2, "all")),),
+        head=None,
+        backbone=None,
+        bridge=None,
+        representation="foam",
+        device=torch.device("cpu"),
+        support_context_mode="all",
+        support_dilation=2,
+    )
+    assert all_metrics["val_renders"] == 1
+    assert all_metrics["val_mse"] == pytest.approx(0.2**2)

@@ -145,9 +145,8 @@ def _sample_episode(
         raise ValueError("A fixed episode is required when resampling is disabled")
     return episode
 
-def _configured_fixed_episode(
-    dataset, config: dict[str, Any]
-) -> NvsEpisode | None:
+
+def _configured_fixed_episode(dataset, config: dict[str, Any]) -> NvsEpisode | None:
     data_cfg = config["data"]
     context_names = data_cfg.get("context_names")
     target_names = data_cfg.get("target_names")
@@ -475,7 +474,8 @@ def _validation(
                 )
                 for target in episode.target
             ]
-            buckets = (group("all"), group(str(label)))
+            label = str(label)
+            buckets = (group("all"),) if label == "all" else (group("all"), group(label))
             for output, target_view, support_mask in zip(
                 outputs, episode.target, support_masks, strict=True
             ):
