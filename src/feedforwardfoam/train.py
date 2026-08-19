@@ -543,6 +543,7 @@ def train(
         register_dim = backbone.register_dim
     backbone.eval()
 
+    head_cfg = config["head"]
     head = build_head(config, register_dim, representation, device)
     optimizer = torch.optim.AdamW(
         head.parameters(),
