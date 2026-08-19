@@ -1,4 +1,5 @@
 """Frozen VGGT-Ω adapter with an explicit test-only geometry stub."""
+
 from __future__ import annotations
 
 import sys
@@ -104,13 +105,19 @@ class FrozenGeometryStub(nn.Module):
         confidence = torch.ones_like(depth)
         summary = images.mean(dim=(2, 3, 4), keepdim=False)
         registers = summary[..., None, None].expand(b, v, self.register_count, self.register_dim)
-        patch_tokens = F.avg_pool2d(images.reshape(b * v, 3, _h, _w), 2, 2).mean(dim=1, keepdim=True)
+        patch_tokens = F.avg_pool2d(images.reshape(b * v, 3, _h, _w), 2, 2).mean(
+            dim=1, keepdim=True
+        )
         patch_tokens = patch_tokens.expand(b * v, self.register_dim, -1, -1).reshape(
             b, v, self.register_dim, patch_tokens.shape[-2], patch_tokens.shape[-1]
+        )
+        predicted_extrinsics = (
+            torch.eye(4, device=images.device, dtype=images.dtype)[:3].expand(b, v, 3, 4).clone()
         )
         return {
             "depth": depth,
             "depth_conf": confidence,
             "registers": registers,
             "patch_tokens": patch_tokens,
+            "predicted_extrinsics": predicted_extrinsics,
         }
