@@ -20,9 +20,14 @@ import torch.nn.functional as F
 import yaml
 
 from feedforwardfoam.backbone import FrozenVGGTOmega
+from feedforwardfoam.fusion import (
+    align_depths_to_calibrated_cameras,
+    build_canonical_support,
+)
 from feedforwardfoam.train import (
     _build_datasets,
     _configured_fixed_episode,
+    _context_tensor,
     _predict,
     build_head,
 )
@@ -85,6 +90,32 @@ def diagnose(config_path: Path, data_root: Path, checkpoint: Path) -> dict[str, 
     own.fill_diagonal_(float("inf"))
     own_nearest = own.min(dim=1).values
 
+    # Restrict to canonical pixels the fusion stage marks as co-visible. If the
+    # two depth clouds are registered, a co-visible view-0 site must have a
+    # view-1 site within roughly the within-view spacing. If it does not, the
+    # clouds are offset rather than describing disjoint surface.
+    images = _context_tensor(episode, device)
+    with torch.no_grad():
+        raw_features = {name: value.clone() for name, value in backbone(images).items()}
+        aligned_depths, _ = align_depths_to_calibrated_cameras(raw_features, episode.context)
+        raw_features["depth"] = aligned_depths
+        support = build_canonical_support(images, raw_features, episode.context, device)
+    co_visible_ratio = None
+    co_visible_fraction = 0.0
+    if support is not None:
+        support_map = support.maps[:, -1:]
+        side = int(round(half**0.5))
+        if support_map.shape[-2:] != (side, side):
+            support_map = F.interpolate(
+                support_map, size=(side, side), mode="bilinear", align_corners=True
+            )
+        co_visible = support_map.reshape(-1) > 0.5
+        co_visible_fraction = float(co_visible.float().mean())
+        forward = torch.cdist(first, second).min(dim=1).values
+        forward_ratio = forward / physical_radii[:half].clamp_min(1e-9)
+        if int(co_visible.sum()) > 0:
+            co_visible_ratio = _quantiles(forward_ratio[co_visible])
+
     return {
         "config": str(config_path),
         "scene_id": episode.scene_id,
@@ -97,6 +128,8 @@ def diagnose(config_path: Path, data_root: Path, checkpoint: Path) -> dict[str, 
         "within_view_nearest_over_radius": _quantiles(
             own_nearest / physical_radii[:half].clamp_min(1e-9)
         ),
+        "co_visible_fraction": co_visible_fraction,
+        "co_visible_nearest_over_radius": co_visible_ratio,
         "power_containment_fraction": float(power_hits.float().mean()),
         "ball_containment_fraction": float(ball_hits.float().mean()),
     }
