@@ -472,6 +472,54 @@ def _atomic_save(state: dict, path: Path) -> None:
     os.replace(temporary, path)
 
 
+def build_head(
+    config: dict[str, Any], register_dim: int, representation: str, device: torch.device
+):
+    """Construct the configured head. Shared by training and diagnostics."""
+    head_cfg = config["head"]
+    if representation == "gaussian":
+        return CanonicalGaussianHead(
+            register_dim=register_dim,
+            hidden_dim=int(head_cfg["hidden_dim"]),
+            max_cells=int(head_cfg["max_cells"]),
+        ).to(device)
+    if representation != "foam":
+        raise ValueError(f"Unknown representation: {representation}")
+    return CanonicalPowerFoamHead(
+        register_dim=register_dim,
+        hidden_dim=int(head_cfg["hidden_dim"]),
+        max_cells=int(head_cfg["max_cells"]),
+        num_texel_sites=int(head_cfg["num_texel_sites"]),
+        spherical_voronoi_dof=int(head_cfg["spherical_voronoi_dof"]),
+        radius_mode=str(head_cfg.get("radius_mode", "learned_absolute")),
+        radius_scale_init=float(head_cfg.get("radius_scale_init", 1.5)),
+        radius_residual_log_scale=float(head_cfg.get("radius_residual_log_scale", 0.25)),
+        density_mode=str(head_cfg.get("density_mode", "learned")),
+        fixed_density=float(head_cfg.get("fixed_density", 100.0)),
+        initialize_rgb_from_image=bool(head_cfg.get("initialize_rgb_from_image", False)),
+        initialize_normals_from_depth=bool(head_cfg.get("initialize_normals_from_depth", True)),
+        base_depth_mode=str(head_cfg.get("base_depth_mode", "predicted")),
+        constant_base_depth=float(head_cfg.get("constant_base_depth", 2.0)),
+        point_residual_scale=float(head_cfg.get("point_residual_scale", 0.05)),
+        normal_residual_radians=float(head_cfg.get("normal_residual_radians", 0.25)),
+        rgb_residual_scale=float(head_cfg.get("rgb_residual_scale", 0.5)),
+        fusion_mode=str(head_cfg.get("fusion_mode", "none")),
+        patch_token_dim=register_dim,
+        prediction_mode=str(head_cfg.get("prediction_mode", "residual")),
+        enable_point_residual=bool(head_cfg.get("enable_point_residual", True)),
+        enable_radius_residual=bool(head_cfg.get("enable_radius_residual", True)),
+        enable_orientation_residual=bool(head_cfg.get("enable_orientation_residual", True)),
+        enable_rgb_residual=bool(head_cfg.get("enable_rgb_residual", True)),
+        proposal_views=str(head_cfg.get("proposal_views", "canonical")),
+        proposal_reduction=str(head_cfg.get("proposal_reduction", "none")),
+        selection_mode=str(head_cfg.get("selection_mode", "gate")),
+        proposal_containment=str(head_cfg.get("proposal_containment", "power")),
+        proposal_containment_tolerance=float(
+            head_cfg.get("proposal_containment_tolerance", 1.0)
+        ),
+    ).to(device)
+
+
 def train(
     config: dict[str, Any],
     data_root: Path,
@@ -495,51 +543,7 @@ def train(
         register_dim = backbone.register_dim
     backbone.eval()
 
-    head_cfg = config["head"]
-    if representation == "foam":
-        head = CanonicalPowerFoamHead(
-            register_dim=register_dim,
-            hidden_dim=int(head_cfg["hidden_dim"]),
-            max_cells=int(head_cfg["max_cells"]),
-            num_texel_sites=int(head_cfg["num_texel_sites"]),
-            spherical_voronoi_dof=int(head_cfg["spherical_voronoi_dof"]),
-            radius_mode=str(head_cfg.get("radius_mode", "learned_absolute")),
-            radius_scale_init=float(head_cfg.get("radius_scale_init", 1.5)),
-            radius_residual_log_scale=float(head_cfg.get("radius_residual_log_scale", 0.25)),
-            density_mode=str(head_cfg.get("density_mode", "learned")),
-            fixed_density=float(head_cfg.get("fixed_density", 100.0)),
-            initialize_rgb_from_image=bool(head_cfg.get("initialize_rgb_from_image", False)),
-            initialize_normals_from_depth=bool(head_cfg.get("initialize_normals_from_depth", True)),
-            base_depth_mode=str(head_cfg.get("base_depth_mode", "predicted")),
-            constant_base_depth=float(head_cfg.get("constant_base_depth", 2.0)),
-            point_residual_scale=float(head_cfg.get("point_residual_scale", 0.05)),
-            normal_residual_radians=float(head_cfg.get("normal_residual_radians", 0.25)),
-            rgb_residual_scale=float(head_cfg.get("rgb_residual_scale", 0.5)),
-            fusion_mode=str(head_cfg.get("fusion_mode", "none")),
-            patch_token_dim=register_dim,
-            prediction_mode=str(head_cfg.get("prediction_mode", "residual")),
-            enable_point_residual=bool(head_cfg.get("enable_point_residual", True)),
-            enable_radius_residual=bool(head_cfg.get("enable_radius_residual", True)),
-            enable_orientation_residual=bool(
-                head_cfg.get("enable_orientation_residual", True)
-            ),
-            enable_rgb_residual=bool(head_cfg.get("enable_rgb_residual", True)),
-            proposal_views=str(head_cfg.get("proposal_views", "canonical")),
-            proposal_reduction=str(head_cfg.get("proposal_reduction", "none")),
-            selection_mode=str(head_cfg.get("selection_mode", "gate")),
-            proposal_containment=str(head_cfg.get("proposal_containment", "power")),
-            proposal_containment_tolerance=float(
-                head_cfg.get("proposal_containment_tolerance", 1.0)
-            ),
-        ).to(device)
-    elif representation == "gaussian":
-        head = CanonicalGaussianHead(
-            register_dim=register_dim,
-            hidden_dim=int(head_cfg["hidden_dim"]),
-            max_cells=int(head_cfg["max_cells"]),
-        ).to(device)
-    else:
-        raise ValueError(f"Unknown representation: {representation}")
+    head = build_head(config, register_dim, representation, device)
     optimizer = torch.optim.AdamW(
         head.parameters(),
         lr=float(config["train"]["learning_rate"]),
