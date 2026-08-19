@@ -96,6 +96,77 @@ def test_multiscene_split_sampling_and_state_roundtrip(tmp_path):
     assert len(episodes[0].target) == 2
 
 
+def test_multiscene_explicit_episodes_preserve_triplets_and_balance_bins(tmp_path):
+    for scene_id in ("train-a", "train-b", "val-a", "val-b"):
+        _write_native_scene(tmp_path, scene_id)
+    prefix = "dslr/resized_undistorted_images"
+
+    def entry(scene_id: str, label: str, offset: int) -> dict:
+        return {
+            "scene_id": scene_id,
+            "context_names": [
+                f"{prefix}/frame_{offset:03d}.JPG",
+                f"{prefix}/frame_{offset + 2:03d}.JPG",
+            ],
+            "target_names": [f"{prefix}/frame_{offset + 1:03d}.JPG"],
+            "bin": label,
+        }
+
+    manifest = tmp_path / "episodes.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "train": [
+                    entry("train-a", "low_angle", 0),
+                    entry("train-b", "mid_angle", 3),
+                ],
+                "val": [
+                    entry("val-a", "low_angle", 0),
+                    entry("val-b", "mid_angle", 3),
+                ],
+            }
+        )
+    )
+    dataset = MultiSceneScanNetPP(
+        tmp_path,
+        manifest,
+        split="train",
+        context_views=2,
+        target_views=1,
+        image_resolution=8,
+        target_pool_size=None,
+        reserve_support_view=False,
+        seed=9,
+    )
+    state = dataset.state_dict()
+    first = dataset.sample_episode()
+    dataset.load_state_dict(state)
+    repeated = dataset.sample_episode()
+    assert [view.name for view in first.context + first.target] == [
+        view.name for view in repeated.context + repeated.target
+    ]
+
+    validation = MultiSceneScanNetPP(
+        tmp_path,
+        manifest,
+        split="val",
+        context_views=2,
+        target_views=1,
+        image_resolution=8,
+        target_pool_size=None,
+        reserve_support_view=False,
+        seed=10,
+    )
+    records = validation.fixed_episode_records(4, seed=11)
+    assert [label for label, _ in records] == [
+        "low_angle",
+        "mid_angle",
+        "low_angle",
+        "mid_angle",
+    ]
+    assert all(len(episode.context) == 2 for _, episode in records)
+
+
 def test_native_scannetpp_loads_explicit_named_triplet(tmp_path):
     scene = _write_native_scene(tmp_path, "named", views=12)
     dataset = ScanNetPPDataset(

@@ -1,4 +1,5 @@
 """Calibrated projection helpers for canonical multi-context evidence fusion."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -12,11 +13,13 @@ from .renderer import pinhole_ray_map_from_view
 
 @dataclass(frozen=True)
 class DepthAlignment:
-    """Affine map from predicted VGGT z-depth into the calibrated scene gauge."""
+    """Scale from predicted VGGT z-depth into the calibrated scene gauge."""
 
     scale: torch.Tensor
+    raw_scale: torch.Tensor
     offset: torch.Tensor
     samples: int
+    bound_hit: bool
 
 
 @dataclass(frozen=True)
@@ -54,36 +57,41 @@ def align_depths_to_calibrated_cameras(
     """
     depths = features["depth"].float()
     if len(context_views) < 2:
+        unit = torch.ones((), device=depths.device)
         alignment = DepthAlignment(
-            scale=torch.ones((), device=depths.device),
+            scale=unit,
+            raw_scale=unit,
             offset=torch.zeros((), device=depths.device),
             samples=0,
+            bound_hit=False,
         )
         return depths, alignment
     predicted_w2c = features["predicted_extrinsics"].float()
     if predicted_w2c.shape[-2:] == (4, 4):
         homogeneous = predicted_w2c
     else:
-        homogeneous = torch.eye(4, device=depths.device, dtype=depths.dtype).expand(
-            *predicted_w2c.shape[:-2], 4, 4
-        ).clone()
+        homogeneous = (
+            torch.eye(4, device=depths.device, dtype=depths.dtype)
+            .expand(*predicted_w2c.shape[:-2], 4, 4)
+            .clone()
+        )
         homogeneous[..., :3, :4] = predicted_w2c
     predicted_c2w = torch.linalg.inv(homogeneous)
     predicted_centers = predicted_c2w[0, : len(context_views), :3, 3]
-    calibrated_centers = torch.stack(
-        [view.c2w[:3, 3].to(depths) for view in context_views]
-    )
+    calibrated_centers = torch.stack([view.c2w[:3, 3].to(depths) for view in context_views])
     predicted_distances = torch.pdist(predicted_centers)
     calibrated_distances = torch.pdist(calibrated_centers)
     valid = (predicted_distances > 1e-6) & torch.isfinite(predicted_distances)
     ratios = calibrated_distances[valid] / predicted_distances[valid]
-    scale = ratios.median() if ratios.numel() else torch.ones((), device=depths.device)
-    scale = scale.clamp(minimum_scale, maximum_scale)
+    raw_scale = ratios.median() if ratios.numel() else torch.ones((), device=depths.device)
+    scale = raw_scale.clamp(minimum_scale, maximum_scale)
     aligned = (depths * scale).clamp_min(1e-3)
     return aligned, DepthAlignment(
         scale=scale,
+        raw_scale=raw_scale,
         offset=torch.zeros((), device=depths.device),
         samples=int(ratios.numel()),
+        bound_hit=bool(raw_scale < minimum_scale or raw_scale > maximum_scale),
     )
 
 
@@ -114,9 +122,7 @@ def project_world_points(
     z_depth = -camera[..., 2]
     height, width = view.image.shape[:2]
     aspect = width / height
-    half_width = torch.tan(
-        torch.tensor(view.fov_x_radians / 2, device=device, dtype=points.dtype)
-    )
+    half_width = torch.tan(torch.tensor(view.fov_x_radians / 2, device=device, dtype=points.dtype))
     half_height = half_width / aspect
     safe_depth = z_depth.clamp_min(1e-6)
     grid_x = camera[..., 0] / (safe_depth * half_width)

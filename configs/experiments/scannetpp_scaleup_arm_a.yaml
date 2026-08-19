@@ -1,0 +1,57 @@
+seed: 17
+output_dir: runs/scannetpp_scaleup_arm_a_seed17
+backbone:
+  checkpoint: null
+  image_resolution: 80
+  allow_stub_backbone: false
+head:
+  max_cells: 6400
+  num_texel_sites: 8
+  spherical_voronoi_dof: 8
+  hidden_dim: 256
+  radius_mode: pixel_footprint
+  radius_scale_init: 1.25
+  radius_residual_log_scale: 0.25
+  density_mode: fixed
+  fixed_density: 10000.0
+  initialize_rgb_from_image: true
+  initialize_normals_from_depth: true
+  base_depth_mode: predicted
+  point_residual_scale: 0.02
+  normal_residual_radians: 0.25
+  rgb_residual_scale: 1.0
+  fusion_mode: projected
+  proposal_views: all
+  proposal_reduction: all
+  selection_mode: uniform
+renderer:
+  render_objective: volume
+  is_pinhole: true
+  bkgd_color: [0.0, 0.0, 0.0]
+data:
+  dataset: scannetpp
+  scene_manifest: data/manifests/scannetpp_scaleup_v1.json
+  context_views: 2
+  target_views: 1
+  target_pool_size: 32
+  image_downsample: 1
+train:
+  steps: 50000
+  learning_rate: 0.0001
+  min_learning_rate: 1.0e-06
+  learning_rate_schedule: cosine
+  weight_decay: 0.0
+  rgb_loss: charbonnier
+  alpha_loss_weight: 0.0
+  log_every: 10
+  validate_every: 1000
+  checkpoint_every: 500
+  validation_episodes: 18
+  validation_render_bundles: true
+  resample_episodes: true
+  target_from_context: false
+  visibility_mask: false
+  visibility_mask_dilation: 2
+  diagnostic_render_every: 1000
+  report_support_metrics: true
+  support_mask_contexts: all

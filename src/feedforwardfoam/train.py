@@ -1,4 +1,5 @@
 """Frozen-VGGT, head-only Power Foam training entry point."""
+
 from __future__ import annotations
 
 import argparse
@@ -15,6 +16,7 @@ from PIL import Image
 from .backbone import FrozenGeometryStub, FrozenVGGTOmega
 from .data.blender import BlenderNvsDataset
 from .data.multiscene import MultiSceneScanNetPP
+from .data.types import NvsEpisode
 from .data.scannetpp import ScanNetPPDataset
 from .fusion import (
     align_depths_to_calibrated_cameras,
@@ -129,13 +131,23 @@ def _build_datasets(config: dict[str, Any], data_root: Path):
     raise ValueError(f"Unknown dataset: {dataset_name}")
 
 
-def _sample_episode(dataset, step: int, resample: bool, fixed_episode):
-    if isinstance(dataset, MultiSceneScanNetPP):
-        return dataset.sample_episode() if resample else fixed_episode
-    return dataset[step % len(dataset)] if resample else fixed_episode
+def _sample_episode(
+    dataset, step: int, resample: bool, fixed_episode: NvsEpisode | None
+) -> NvsEpisode:
+    episode = (
+        dataset.sample_episode()
+        if isinstance(dataset, MultiSceneScanNetPP) and resample
+        else dataset[step % len(dataset)]
+        if resample
+        else fixed_episode
+    )
+    if episode is None:
+        raise ValueError("A fixed episode is required when resampling is disabled")
+    return episode
 
-
-def _configured_fixed_episode(dataset, config: dict[str, Any]):
+def _configured_fixed_episode(
+    dataset, config: dict[str, Any]
+) -> NvsEpisode | None:
     data_cfg = config["data"]
     context_names = data_cfg.get("context_names")
     target_names = data_cfg.get("target_names")
@@ -186,14 +198,11 @@ def _triplet_geometry(episode) -> dict[str, Any]:
     }
 
 
-def _save_diagnostic_images(output_dir: Path, step: int, episode, outputs) -> None:
-    snapshot_dir = output_dir / "diagnostic_renders" / f"step_{step:06d}"
+def _save_render_bundle(snapshot_dir: Path, episode, outputs) -> None:
     snapshot_dir.mkdir(parents=True, exist_ok=True)
 
     def save_tensor(tensor: torch.Tensor, path: Path) -> None:
-        array = (
-            tensor.detach().clamp(0, 1).mul(255).round().to(torch.uint8).cpu().numpy()
-        )
+        array = tensor.detach().clamp(0, 1).mul(255).round().to(torch.uint8).cpu().numpy()
         Image.fromarray(array).save(path)
 
     for index, view in enumerate(episode.context):
@@ -203,6 +212,10 @@ def _save_diagnostic_images(output_dir: Path, step: int, episode, outputs) -> No
         save_tensor(view.image, snapshot_dir / f"target_{index}.png")
         save_tensor(output.rgb, snapshot_dir / f"prediction_{index}.png")
         save_tensor((output.rgb - target).abs(), snapshot_dir / f"error_{index}.png")
+
+
+def _save_diagnostic_images(output_dir: Path, step: int, episode, outputs) -> None:
+    _save_render_bundle(output_dir / "diagnostic_renders" / f"step_{step:06d}", episode, outputs)
 
 
 def _render_targets(params, target_views, bridge, representation: str, device: torch.device):
@@ -253,9 +266,7 @@ def _reorder_context_features(
     features: dict[str, torch.Tensor], order: list[int], view_count: int
 ) -> dict[str, torch.Tensor]:
     return {
-        name: value[:, order]
-        if value.ndim >= 2 and value.shape[1] == view_count
-        else value
+        name: value[:, order] if value.ndim >= 2 and value.shape[1] == view_count else value
         for name, value in features.items()
     }
 
@@ -280,7 +291,6 @@ def _proposal_confidence(
     return flat[uniform_selection_indices(flat.shape[0], budget, flat.device)]
 
 
-
 def _predict(head, backbone, episode, representation: str, device: torch.device):
     images = _context_tensor(episode, device)
     with torch.no_grad():
@@ -291,6 +301,10 @@ def _predict(head, backbone, episode, representation: str, device: torch.device)
     aligned_depths, alignment = align_depths_to_calibrated_cameras(features, episode.context)
     features["depth"] = aligned_depths
     features["depth_alignment_scale"] = alignment.scale[None]
+    features["depth_alignment_raw_scale"] = alignment.raw_scale[None]
+    features["depth_alignment_bound_hit"] = torch.tensor(float(alignment.bound_hit), device=device)[
+        None
+    ]
 
     proposal_views = getattr(head, "proposal_views", "canonical")
     if representation != "foam" or proposal_views == "canonical":
@@ -354,9 +368,7 @@ def _predict(head, backbone, episode, representation: str, device: torch.device)
         support = build_canonical_support(
             ordered_images, ordered_features, ordered_contexts, device
         )
-        support_fractions.append(
-            float(support.maps[:, -1].mean()) if support is not None else 0.0
-        )
+        support_fractions.append(float(support.maps[:, -1].mean()) if support is not None else 0.0)
         ray_map = pinhole_ray_map_from_view(ordered_contexts[0], device)
         canonical_points = world_points_from_z_depth(
             ordered_contexts[0], ordered_features["depth"][:, 0], device
@@ -419,36 +431,112 @@ def _predict(head, backbone, episode, representation: str, device: torch.device)
 
 
 def _validation(
-    episodes,
+    records,
     *,
     head,
     backbone,
     bridge,
     representation: str,
     device: torch.device,
+    support_context_mode: str,
+    support_dilation: int,
+    output_dir: Path | None = None,
+    step: int | None = None,
 ) -> dict[str, float]:
-    mse_values = []
-    alpha_values = []
+    groups: dict[str, dict[str, list[float]]] = {}
+
+    def group(name: str) -> dict[str, list[float]]:
+        return groups.setdefault(
+            name,
+            {
+                "mse": [],
+                "support_mse": [],
+                "support_fraction": [],
+                "alpha": [],
+                "coverage": [],
+                "gauge_hit": [],
+            },
+        )
+
     with torch.no_grad():
-        for episode in episodes:
-            params, _ = _predict(head, backbone, episode, representation, device)
+        for index, (label, episode) in enumerate(records):
+            params, features = _predict(head, backbone, episode, representation, device)
             outputs = _render_targets(params, episode.target, bridge, representation, device)
-            for output, target_view in zip(outputs, episode.target, strict=True):
-                mse_values.append(
-                    F.mse_loss(output.rgb.clamp(0, 1), target_view.image.to(device)).item()
+            mask_contexts = (
+                episode.context[:1] if support_context_mode == "canonical" else episode.context
+            )
+            support_masks = [
+                projected_context_support_mask(
+                    mask_contexts,
+                    features["depth"][:, : len(mask_contexts)],
+                    target,
+                    device,
+                    dilation=support_dilation,
                 )
-                alpha_values.append(float(output.alpha.mean()))
-    mse = sum(mse_values) / len(mse_values)
-    return {
-        "val_mse": mse,
-        "val_psnr": -10.0 * torch.log10(torch.tensor(mse + 1e-10)).item(),
-        "val_alpha_mean": sum(alpha_values) / len(alpha_values),
-        "val_renders": float(len(mse_values)),
-    }
+                for target in episode.target
+            ]
+            buckets = (group("all"), group(str(label)))
+            for output, target_view, support_mask in zip(
+                outputs, episode.target, support_masks, strict=True
+            ):
+                target = target_view.image.to(device)
+                mse = F.mse_loss(output.rgb.clamp(0, 1), target).item()
+                support_mse = (
+                    F.mse_loss(output.rgb.clamp(0, 1)[support_mask], target[support_mask]).item()
+                    if support_mask.any()
+                    else None
+                )
+                alpha_mask = output.alpha > 0.01
+                for bucket in buckets:
+                    bucket["mse"].append(mse)
+                    bucket["alpha"].append(float(output.alpha.mean()))
+                    bucket["support_fraction"].append(float(support_mask.float().mean()))
+                    bucket["coverage"].append(float(alpha_mask.float().mean()))
+                    if support_mse is not None:
+                        bucket["support_mse"].append(support_mse)
+            gauge_hit = float(features["depth_alignment_bound_hit"].mean())
+            for bucket in buckets:
+                bucket["gauge_hit"].append(gauge_hit)
+            if output_dir is not None and step is not None:
+                _save_render_bundle(
+                    output_dir
+                    / "validation_renders"
+                    / f"step_{step:06d}"
+                    / f"{index:03d}_{label}_{episode.scene_id}",
+                    episode,
+                    outputs,
+                )
+
+    result: dict[str, float] = {}
+    for label, values in groups.items():
+        suffix = "" if label == "all" else f"_{label}"
+        mse = sum(values["mse"]) / len(values["mse"])
+        result[f"val_mse{suffix}"] = mse
+        result[f"val_psnr{suffix}"] = -10.0 * torch.log10(torch.tensor(mse + 1e-10)).item()
+        result[f"val_alpha_mean{suffix}"] = sum(values["alpha"]) / len(values["alpha"])
+        result[f"val_support_fraction{suffix}"] = sum(values["support_fraction"]) / len(
+            values["support_fraction"]
+        )
+        result[f"val_render_coverage_fraction{suffix}"] = sum(values["coverage"]) / len(
+            values["coverage"]
+        )
+        result[f"val_gauge_bound_hit_fraction{suffix}"] = sum(values["gauge_hit"]) / len(
+            values["gauge_hit"]
+        )
+        if values["support_mse"]:
+            support_mse = sum(values["support_mse"]) / len(values["support_mse"])
+            result[f"val_support_mse{suffix}"] = support_mse
+            result[f"val_support_psnr{suffix}"] = (
+                -10.0 * torch.log10(torch.tensor(support_mse + 1e-10)).item()
+            )
+    result["val_renders"] = float(len(groups["all"]["mse"]))
+    return result
 
 
-def _checkpoint_state(head, optimizer, scheduler, step, history, train_dataset, config):
-    state = {
+def _checkpoint_state(
+    head, optimizer, scheduler, step, history, train_dataset, config
+) -> dict[str, object]:
+    state: dict[str, object] = {
         "head": head.state_dict(),
         "optimizer": optimizer.state_dict(),
         "step": step,
@@ -466,7 +554,7 @@ def _checkpoint_state(head, optimizer, scheduler, step, history, train_dataset, 
     return state
 
 
-def _atomic_save(state: dict, path: Path) -> None:
+def _atomic_save(state: dict[str, object], path: Path) -> None:
     temporary = path.with_suffix(path.suffix + ".tmp")
     torch.save(state, temporary)
     os.replace(temporary, path)
@@ -514,9 +602,7 @@ def build_head(
         proposal_reduction=str(head_cfg.get("proposal_reduction", "none")),
         selection_mode=str(head_cfg.get("selection_mode", "gate")),
         proposal_containment=str(head_cfg.get("proposal_containment", "power")),
-        proposal_containment_tolerance=float(
-            head_cfg.get("proposal_containment_tolerance", 1.0)
-        ),
+        proposal_containment_tolerance=float(head_cfg.get("proposal_containment_tolerance", 1.0)),
     ).to(device)
 
 
@@ -623,21 +709,29 @@ def train(
     resample = bool(train_cfg.get("resample_episodes", True))
     if configured_episode is not None and resample:
         raise ValueError("Explicit fixed episodes require train.resample_episodes: false")
-    val_episodes = (
-        val_dataset.fixed_episodes(
+    val_records = (
+        val_dataset.fixed_episode_records(
             int(train_cfg.get("validation_episodes", 4)), int(config["seed"]) + 20_000
         )
         if val_dataset is not None
         else ()
     )
-    best_full_psnr = max((record.get("train_psnr", float("-inf")) for record in history), default=float("-inf"))
+    best_full_key = "val_psnr" if val_records else "train_psnr"
+    best_support_key = "val_support_psnr" if val_records else "support_psnr"
+    best_full_psnr = max(
+        (record.get(best_full_key, float("-inf")) for record in history),
+        default=float("-inf"),
+    )
     best_support_psnr = max(
-        (record.get("support_psnr", float("-inf")) for record in history), default=float("-inf")
+        (record.get(best_support_key, float("-inf")) for record in history),
+        default=float("-inf"),
     )
     for step in range(start_step, int(train_cfg["steps"]) + 1):
         episode = _sample_episode(train_dataset, step, resample, fixed_episode)
         params, features = _predict(head, backbone, episode, representation, device)
-        target_views = episode.context if bool(train_cfg.get("target_from_context", False)) else episode.target
+        target_views = (
+            episode.context if bool(train_cfg.get("target_from_context", False)) else episode.target
+        )
         outputs = _render_targets(params, target_views, bridge, representation, device)
         use_mask = bool(train_cfg.get("visibility_mask", False))
         report_support = bool(train_cfg.get("report_support_metrics", False)) or use_mask
@@ -672,9 +766,7 @@ def train(
         )
         optimizer.zero_grad(set_to_none=True)
         loss.backward()
-        grad_norm = torch.nn.utils.clip_grad_norm_(
-            head.parameters(), 1.0, error_if_nonfinite=True
-        )
+        grad_norm = torch.nn.utils.clip_grad_norm_(head.parameters(), 1.0, error_if_nonfinite=True)
         optimizer.step()
         if scheduler is not None:
             scheduler.step()
@@ -686,9 +778,7 @@ def train(
         support_per_target = (
             [
                 _metrics(output.rgb.detach(), view.image.to(device), mask)
-                for output, view, mask in zip(
-                    outputs, target_views, support_masks, strict=True
-                )
+                for output, view, mask in zip(outputs, target_views, support_masks, strict=True)
             ]
             if support_masks is not None and all(mask.any() for mask in support_masks)
             else None
@@ -705,16 +795,18 @@ def train(
             "train_mse": sum(metric["mse"] for metric in per_target) / len(per_target),
             "render_alpha_mean": sum(float(output.alpha.detach().mean()) for output in outputs)
             / len(outputs),
-            "active_cells": float(params.points.shape[0] if representation == "foam" else params.means.shape[0]),
+            "active_cells": float(
+                params.points.shape[0] if representation == "foam" else params.means.shape[0]
+            ),
             "mean_radius": float(
                 F.softplus(params.radii.detach(), beta=100).mean()
                 if representation == "foam"
                 else params.scales.detach().mean()
             ),
             "depth_alignment_scale": float(features["depth_alignment_scale"].mean()),
-            "canonical_support_fraction": float(
-                features["canonical_support_fraction"].mean()
-            ),
+            "depth_alignment_raw_scale": float(features["depth_alignment_raw_scale"].mean()),
+            "depth_alignment_bound_hit": float(features["depth_alignment_bound_hit"].mean()),
+            "canonical_support_fraction": float(features["canonical_support_fraction"].mean()),
             "visibility_mask_fraction": float(
                 torch.stack([mask.float().mean() for mask in support_masks]).mean()
                 if support_masks is not None
@@ -746,26 +838,36 @@ def train(
                     / float(torch.stack(unions).mean().clamp_min(1e-8)),
                 }
             )
-        if val_episodes and step % int(train_cfg["validate_every"]) == 0:
+        if val_records and step % int(train_cfg["validate_every"]) == 0:
             record.update(
                 _validation(
-                    val_episodes,
+                    val_records,
                     head=head,
                     backbone=backbone,
                     bridge=bridge,
                     representation=representation,
                     device=device,
+                    support_context_mode=support_context_mode,
+                    support_dilation=int(train_cfg.get("visibility_mask_dilation", 2)),
+                    output_dir=(
+                        output_dir
+                        if bool(train_cfg.get("validation_render_bundles", False))
+                        else None
+                    ),
+                    step=step,
                 )
             )
         history.append(record)
-        if record["train_psnr"] > best_full_psnr:
-            best_full_psnr = record["train_psnr"]
+        full_psnr = record.get(best_full_key, float("-inf"))
+        if full_psnr > best_full_psnr:
+            best_full_psnr = full_psnr
             _atomic_save(
                 _checkpoint_state(head, optimizer, scheduler, step, history, train_dataset, config),
                 output_dir / "best_full.pt",
             )
-        if record.get("support_psnr", float("-inf")) > best_support_psnr:
-            best_support_psnr = record["support_psnr"]
+        support_psnr = record.get(best_support_key, float("-inf"))
+        if support_psnr > best_support_psnr:
+            best_support_psnr = support_psnr
             _atomic_save(
                 _checkpoint_state(head, optimizer, scheduler, step, history, train_dataset, config),
                 output_dir / "best_support.pt",
