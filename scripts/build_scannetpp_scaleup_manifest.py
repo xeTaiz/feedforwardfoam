@@ -14,6 +14,8 @@ from __future__ import annotations
 import argparse
 import json
 from collections import Counter
+from concurrent.futures import ProcessPoolExecutor
+import os
 from pathlib import Path
 from typing import Any
 
@@ -98,31 +100,45 @@ def _read_scene_ids(path: Path) -> list[str]:
     return scene_ids
 
 
+def _select_scene_result(
+    request: tuple[Path, int, int],
+) -> tuple[str, list[dict[str, Any]], str | None]:
+    scene_root, neighbors, episodes_per_scene = request
+    try:
+        selected = _select_scene_episodes(
+            scene_root, neighbors=neighbors, episodes_per_scene=episodes_per_scene
+        )
+    except (FileNotFoundError, ValueError, KeyError) as error:
+        return scene_root.name, [], str(error)
+    if not selected:
+        return scene_root.name, [], "no triplet passed pose constraints"
+    return scene_root.name, selected, None
+
+
 def _build_split(
     data_dir: Path,
     split_file: Path,
     *,
     neighbors: int,
     episodes_per_scene: int,
+    workers: int,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    scene_ids = _read_scene_ids(split_file)
+    requests = [(data_dir / scene_id, neighbors, episodes_per_scene) for scene_id in scene_ids]
+    with ProcessPoolExecutor(max_workers=workers) as executor:
+        results = executor.map(_select_scene_result, requests)
+        selected_by_scene = list(results)
+
     episodes: list[dict[str, Any]] = []
     skipped: dict[str, str] = {}
-    for scene_id in _read_scene_ids(split_file):
-        scene_root = data_dir / scene_id
-        try:
-            selected = _select_scene_episodes(
-                scene_root, neighbors=neighbors, episodes_per_scene=episodes_per_scene
-            )
-        except (FileNotFoundError, ValueError, KeyError) as error:
-            skipped[scene_id] = str(error)
-            continue
-        if not selected:
-            skipped[scene_id] = "no triplet passed pose constraints"
-            continue
-        episodes.extend(selected)
+    for scene_id, selected, error in selected_by_scene:
+        if error is not None:
+            skipped[scene_id] = error
+        else:
+            episodes.extend(selected)
     counts = Counter(str(episode["bin"]) for episode in episodes)
     stats = {
-        "requested_scenes": len(_read_scene_ids(split_file)),
+        "requested_scenes": len(scene_ids),
         "selected_scenes": len({str(episode["scene_id"]) for episode in episodes}),
         "episodes": len(episodes),
         "bins": dict(sorted(counts.items())),
@@ -138,11 +154,14 @@ def main() -> None:
     parser.add_argument("--neighbors", type=int, default=12)
     parser.add_argument("--train-episodes-per-scene", type=int, default=6)
     parser.add_argument("--val-episodes-per-scene", type=int, default=3)
+    parser.add_argument("--workers", type=int, default=min(8, os.cpu_count() or 1))
     args = parser.parse_args()
     if args.neighbors < 2:
         parser.error("--neighbors must be at least 2")
     if args.train_episodes_per_scene <= 0 or args.val_episodes_per_scene <= 0:
         parser.error("episodes per scene must be positive")
+    if args.workers <= 0:
+        parser.error("--workers must be positive")
 
     data_dir = args.scannetpp_root / "data"
     splits_dir = args.scannetpp_root / "splits"
@@ -151,12 +170,14 @@ def main() -> None:
         splits_dir / "nvs_sem_train.txt",
         neighbors=args.neighbors,
         episodes_per_scene=args.train_episodes_per_scene,
+        workers=args.workers,
     )
     validation, val_stats = _build_split(
         data_dir,
         splits_dir / "nvs_sem_val.txt",
         neighbors=args.neighbors,
         episodes_per_scene=args.val_episodes_per_scene,
+        workers=args.workers,
     )
     manifest = {
         "version": 1,
