@@ -95,6 +95,10 @@ def _select_scene_episodes(
                 break
         if not progressed:
             break
+    for episode in selected:
+        for name in (*episode["context_names"], *episode["target_names"]):
+            if not (scene_root / name).is_file():
+                raise FileNotFoundError(f"Selected view is missing: {scene_root / name}")
     return selected
 
 
