@@ -1,5 +1,5 @@
 seed: 17
-output_dir: runs/multiview_proposals_g_incremental_power_half
+output_dir: runs/probe_incr_power_10
 backbone:
   checkpoint: null
   image_resolution: 80
@@ -24,7 +24,7 @@ head:
   proposal_views: all
   proposal_reduction: incremental
   proposal_containment: power
-  proposal_containment_tolerance: 0.5
+  proposal_containment_tolerance: 1.0
   selection_mode: uniform
 renderer:
   render_objective: volume
