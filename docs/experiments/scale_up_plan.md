@@ -80,7 +80,8 @@ measured quantities directly.
 - Reduction arm: arm A (all-proposal concatenation, no reduction). Arms B–E are
   all worse at a reduced budget, and the two world-space follow-ups (D fps,
   E confidence voxel) were measured and rejected — see
-  `docs/experiments/proposal_reduction_arms.md`. Revisit only if a pixel-space
+  `docs/experiments/proposal_reduction_arms.md`. Containment merging (arm F) is
+  quality-neutral and may be enabled as a structural guarantee. Revisit only if a pixel-space
   reduction arm beats arm B.
 - Retain `best_full.pt` / `best_support.pt`; cosine LR.
 

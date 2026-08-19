@@ -362,7 +362,7 @@ Concise (start here):
 - `docs/experiments/scannetpp_two_context_progress.md` — stability gate + multi-scene two-context
 - `docs/experiments/scannetpp_multiview_progress.md` — 1/2/4/8 target supervision
 - `docs/experiments/stratified_and_proposal_matrix.md` — stratified + two-target + A/B/C/D/E queue
-- `docs/experiments/proposal_reduction_arms.md` — **A/B/C/D/E reduction results; fps and confidence-voxel rejected**
+- `docs/experiments/proposal_reduction_arms.md` — **A–G reduction/merge results; containment merge validated as safe, fps and confidence-voxel rejected**
 - `docs/experiments/scale_up_plan.md` — parked long-run plan, worker/data inventory, obs-proxy calibration prerequisite
 - `docs/references/decoder_design_overview.md` — concise decoder/proposal ideas
 

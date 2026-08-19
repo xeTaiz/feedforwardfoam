@@ -1,5 +1,5 @@
 seed: 17
-output_dir: runs/multiview_proposals_h_incremental_ball
+output_dir: runs/multiview_proposals_g_incremental_ball
 backbone:
   checkpoint: null
   image_resolution: 80
@@ -24,7 +24,7 @@ head:
   proposal_views: all
   proposal_reduction: incremental
   proposal_containment: ball
-  proposal_containment_tolerance: 1.0
+  proposal_containment_tolerance: 1.5
   selection_mode: uniform
 renderer:
   render_objective: volume
