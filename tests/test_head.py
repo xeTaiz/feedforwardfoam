@@ -6,6 +6,7 @@ from feedforwardfoam.head import (
     depth_normals,
     concatenate_foam_parameters,
     farthest_point_indices,
+    incremental_containment_indices,
     inverse_softplus,
     select_foam_parameters,
     uniform_selection_indices,
@@ -284,6 +285,37 @@ def test_confidence_scores_must_match_the_proposal_count():
         assert "match the proposal count" in str(error)
     else:
         raise AssertionError("Mismatched scores must raise")
+
+
+def test_incremental_containment_distinguishes_power_and_ball_criteria():
+    # One kept site of physical radius 0.1 at the origin, then three newcomers
+    # of radius 0.05 at increasing distance along x.
+    points = torch.tensor(
+        [[0.0, 0.0, 0.0], [0.02, 0.0, 0.0], [0.09, 0.0, 0.0], [0.5, 0.0, 0.0]]
+    )
+    raw_radii = inverse_softplus(torch.tensor([0.1, 0.05, 0.05, 0.05]))
+
+    power = incremental_containment_indices(points, raw_radii, [1, 3], criterion="power")
+    ball = incremental_containment_indices(points, raw_radii, [1, 3], criterion="ball")
+    untouched = incremental_containment_indices(points, raw_radii, [1, 3], tolerance=0.0)
+
+    # d=0.09: inside the sphere, but 0.09^2 + 0.05^2 > 0.1^2 so its own centre
+    # still escapes the incumbent power cell and the site survives.
+    assert power.tolist() == [0, 2, 3]
+    assert ball.tolist() == [0, 3]
+    # Zero tolerance disables the merge entirely.
+    assert untouched.tolist() == [0, 1, 2, 3]
+
+
+def test_incremental_containment_rejects_group_sizes_that_miss_proposals():
+    points = torch.rand(6, 3)
+    raw_radii = inverse_softplus(torch.full((6,), 0.05))
+    try:
+        incremental_containment_indices(points, raw_radii, [2, 2])
+    except ValueError as error:
+        assert "cover every proposal" in str(error)
+    else:
+        raise AssertionError("Incomplete group sizes must raise")
 
 
 def test_source_alpha_fixed_density_makes_background_cells_empty():

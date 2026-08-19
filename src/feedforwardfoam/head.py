@@ -153,6 +153,79 @@ def farthest_point_indices(
     return selected
 
 
+def incremental_containment_indices(
+    points: torch.Tensor,
+    raw_radii: torch.Tensor,
+    group_sizes: list[int],
+    *,
+    criterion: str = "power",
+    tolerance: float = 1.0,
+    beta: float = 100.0,
+    chunk: int = 4096,
+) -> torch.Tensor:
+    """Keep one context's proposals whole, then add only non-redundant others.
+
+    Every site of the first group survives. A later-group site is dropped when
+    an already kept site already claims its centre, so the merge removes
+    duplicates rather than distinct geometry and the surviving count floats
+    with the scene instead of hitting a fixed budget.
+
+    ``criterion`` selects the containment test against a kept site ``i``:
+
+    - ``power``: ``|p_j - p_i|^2 + r_j^2 <= (tolerance * r_i)^2``. This is
+      exactly the condition under which ``p_j`` is not inside ``j``'s own power
+      cell, so the new cell would collapse into a sliver.
+    - ``ball``: ``|p_j - p_i| <= tolerance * r_i``, the plain sphere test.
+
+    ``tolerance`` scales the incumbent radius; ``0`` keeps every proposal and
+    reproduces unreduced concatenation, ``1`` applies the exact test.
+
+    ``raw_radii`` are upstream-domain radii as carried by ``FoamParameters``;
+    the physical extent used for the test is recovered here with the softplus
+    that ``inverse_softplus`` inverts. Sites within one group are never tested
+    against each other because a single view's proposals are a regular pixel
+    lattice with no duplicates.
+    """
+    if criterion not in {"power", "ball"}:
+        raise ValueError(f"Unknown containment criterion: {criterion}")
+    if tolerance < 0.0:
+        raise ValueError("Containment tolerance must be non-negative")
+    if sum(group_sizes) != points.shape[0]:
+        raise ValueError("Group sizes must cover every proposal exactly")
+    device = points.device
+    detached_points = points.detach()
+    physical_radii = F.softplus(raw_radii.detach(), beta=beta).reshape(-1)
+    bounds = []
+    start = 0
+    for size in group_sizes:
+        bounds.append((start, start + size))
+        start += size
+
+    first_begin, first_end = bounds[0]
+    kept = [torch.arange(first_begin, first_end, device=device)]
+    kept_points = detached_points[first_begin:first_end]
+    kept_radii = physical_radii[first_begin:first_end]
+    for begin, end in bounds[1:]:
+        if end <= begin:
+            continue
+        candidates = torch.arange(begin, end, device=device)
+        candidate_points = detached_points[begin:end]
+        candidate_radii = physical_radii[begin:end]
+        limit = (tolerance * kept_radii).square()
+        survives = torch.ones(candidates.shape[0], dtype=torch.bool, device=device)
+        for offset in range(0, candidates.shape[0], chunk):
+            block = slice(offset, min(offset + chunk, candidates.shape[0]))
+            squared = torch.cdist(candidate_points[block], kept_points).square()
+            if criterion == "power":
+                squared = squared + candidate_radii[block, None].square()
+            survives[block] = ~(squared <= limit[None, :]).any(dim=1)
+        selected = candidates[survives]
+        kept.append(selected)
+        kept_points = torch.cat([kept_points, detached_points[selected]])
+        kept_radii = torch.cat([kept_radii, physical_radii[selected]])
+    return torch.cat(kept)
+
+
 def voxel_budget_indices(
     points: torch.Tensor,
     budget: int,
@@ -261,6 +334,8 @@ class CanonicalPowerFoamHead(nn.Module):
         proposal_views: str = "canonical",
         proposal_reduction: str = "none",
         selection_mode: str = "gate",
+        proposal_containment: str = "power",
+        proposal_containment_tolerance: float = 1.0,
     ) -> None:
         super().__init__()
         if radius_mode not in {"learned_absolute", "pixel_footprint"}:
@@ -275,10 +350,22 @@ class CanonicalPowerFoamHead(nn.Module):
             raise ValueError(f"Unknown prediction mode: {prediction_mode}")
         if proposal_views not in {"canonical", "all"}:
             raise ValueError(f"Unknown proposal views: {proposal_views}")
-        if proposal_reduction not in {"none", "all", "balanced", "voxel", "fps", "confidence_voxel"}:
+        if proposal_reduction not in {
+            "none",
+            "all",
+            "balanced",
+            "voxel",
+            "fps",
+            "confidence_voxel",
+            "incremental",
+        }:
             raise ValueError(f"Unknown proposal reduction: {proposal_reduction}")
         if selection_mode not in {"gate", "uniform"}:
             raise ValueError(f"Unknown selection mode: {selection_mode}")
+        if proposal_containment not in {"power", "ball"}:
+            raise ValueError(f"Unknown proposal containment: {proposal_containment}")
+        if proposal_containment_tolerance < 0.0:
+            raise ValueError("Proposal containment tolerance must be non-negative")
         if fusion_mode == "projected" and patch_token_dim is None:
             raise ValueError("Projected fusion requires patch_token_dim")
         self.max_cells = max_cells
@@ -305,6 +392,8 @@ class CanonicalPowerFoamHead(nn.Module):
         self.proposal_views = proposal_views
         self.proposal_reduction = proposal_reduction
         self.selection_mode = selection_mode
+        self.proposal_containment = proposal_containment
+        self.proposal_containment_tolerance = float(proposal_containment_tolerance)
         self._proposal_index_cache: dict[tuple, torch.Tensor] = {}
         self.local = nn.Sequential(
             nn.Conv2d(5, hidden_dim, 3, padding=1),

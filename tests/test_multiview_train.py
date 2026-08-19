@@ -100,7 +100,9 @@ def _proposal_episode() -> NvsEpisode:
     )
 
 
-def _proposal_head(reduction: str, selection_mode: str = "uniform") -> CanonicalPowerFoamHead:
+def _proposal_head(
+    reduction: str, selection_mode: str = "uniform", **kwargs
+) -> CanonicalPowerFoamHead:
     return CanonicalPowerFoamHead(
         register_dim=8,
         hidden_dim=16,
@@ -108,6 +110,7 @@ def _proposal_head(reduction: str, selection_mode: str = "uniform") -> Canonical
         proposal_views="all",
         proposal_reduction=reduction,
         selection_mode=selection_mode,
+        **kwargs,
     )
 
 
@@ -143,3 +146,36 @@ def test_confidence_voxel_rejects_gate_selection_that_misaligns_scores():
             "foam",
             torch.device("cpu"),
         )
+
+
+def _incremental_cells(**kwargs) -> int:
+    head = _proposal_head("incremental", **kwargs)
+    params, _ = _predict(
+        head,
+        _StubBackboneWithCameras(register_dim=8),
+        _proposal_episode(),
+        "foam",
+        torch.device("cpu"),
+    )
+    return params.points.shape[0]
+
+
+def test_incremental_merge_at_zero_tolerance_keeps_every_proposal():
+    # Two 4x4 contexts propose 32 cells; zero tolerance must reduce to nothing.
+    assert _incremental_cells(proposal_containment_tolerance=0.0) == 32
+
+
+def test_incremental_merge_never_drops_the_first_context():
+    for criterion in ("power", "ball"):
+        cells = _incremental_cells(
+            proposal_containment=criterion, proposal_containment_tolerance=1.0
+        )
+        assert 16 <= cells <= 32
+
+
+def test_incremental_merge_is_weaker_under_the_power_criterion():
+    # The power test subtracts the newcomer's own radius, so it can only keep
+    # at least as many sites as the plain sphere test.
+    power = _incremental_cells(proposal_containment="power", proposal_containment_tolerance=1.0)
+    ball = _incremental_cells(proposal_containment="ball", proposal_containment_tolerance=1.0)
+    assert power >= ball

@@ -27,6 +27,7 @@ from .head import (
     CanonicalPowerFoamHead,
     concatenate_foam_parameters,
     farthest_point_indices,
+    incremental_containment_indices,
     select_foam_parameters,
     uniform_selection_indices,
     voxel_budget_indices,
@@ -321,8 +322,8 @@ def _predict(head, backbone, episode, representation: str, device: torch.device)
     reduction = head.proposal_reduction
     if reduction == "none":
         raise ValueError(
-            "All-view proposals require all, balanced, voxel, fps, or "
-            "confidence_voxel reduction"
+            "All-view proposals require all, balanced, voxel, fps, "
+            "confidence_voxel, or incremental reduction"
         )
     if reduction == "confidence_voxel" and not (
         head.selection_mode == "uniform" or head.prediction_mode == "initialization"
@@ -332,7 +333,7 @@ def _predict(head, backbone, episode, representation: str, device: torch.device)
             "scores stay aligned with decoded cells"
         )
     height, width = episode.context[0].image.shape[:2]
-    full_budget_reductions = {"all", "voxel", "fps", "confidence_voxel"}
+    full_budget_reductions = {"all", "voxel", "fps", "confidence_voxel", "incremental"}
     per_view_budgets = []
     for index in range(view_count):
         if reduction in full_budget_reductions:
@@ -400,6 +401,17 @@ def _predict(head, backbone, episode, representation: str, device: torch.device)
             indices = indices.detach().cpu()
             head._proposal_index_cache[cache_key] = indices
         params = select_foam_parameters(params, indices.to(params.points.device))
+    if reduction == "incremental":
+        # Radii change during training, so the surviving set is recomputed each
+        # step rather than cached like the fixed-budget reductions.
+        indices = incremental_containment_indices(
+            params.points,
+            params.radii,
+            [proposal.points.shape[0] for proposal in proposals],
+            criterion=head.proposal_containment,
+            tolerance=head.proposal_containment_tolerance,
+        )
+        params = select_foam_parameters(params, indices)
     features["canonical_support_fraction"] = torch.tensor(
         sum(support_fractions) / len(support_fractions), device=device
     )[None]
@@ -515,6 +527,10 @@ def train(
             proposal_views=str(head_cfg.get("proposal_views", "canonical")),
             proposal_reduction=str(head_cfg.get("proposal_reduction", "none")),
             selection_mode=str(head_cfg.get("selection_mode", "gate")),
+            proposal_containment=str(head_cfg.get("proposal_containment", "power")),
+            proposal_containment_tolerance=float(
+                head_cfg.get("proposal_containment_tolerance", 1.0)
+            ),
         ).to(device)
     elif representation == "gaussian":
         head = CanonicalGaussianHead(
