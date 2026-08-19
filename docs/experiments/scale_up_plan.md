@@ -1,6 +1,6 @@
 # ScanNet++ longer-training plan and execution state
 
-Status: **ready to launch, blocked only on checkpoint placement**.
+Status: **running** — arm A scale-up training launched on `KW60995`.
 Worker/data setup and the scene-disjoint episode manifest are complete.
 
 ## Current execution state (2026-08-18)
@@ -20,30 +20,26 @@ Worker/data setup and the scene-disjoint episode manifest are complete.
   claimed multi-GPU run would instead be multiple independent models. The
   primary 50,000-step run therefore uses one GPU and keeps the other devices
   available.
-- Launch blocker: the gated 4,576,706,117-byte
-  `vggt_omega_1b_512.pt` checkpoint is not present on `KW60995`. Hugging Face
-  download returned access denied. The existing copy on `KW60996` is outside
-  every path that worker advertises to `wh_dispatch data_copy`, so the harness
-  correctly refuses the transfer.
+- Checkpoint source: the gated `vggt_omega_1b_512.pt` was placed on the shared
+  `/data` mount and is copied into the checkout only after its size and MD5
+  (`bc5302eada6222303c5e5f8d7dbce709`) match exactly.
 
-Once the checkpoint exists at
-`/code/feedforwardfoam-scaleup/checkpoints/vggt_omega_1b_512.pt`, launch with:
+Launcher `scripts/run_scannetpp_scaleup.sh` waits for that verified checkpoint,
+copies it into the checkout, and then runs:
 
 ```bash
 cd /code/feedforwardfoam-scaleup
 source .venv-powerfoam/bin/activate
-export LD_LIBRARY_PATH=/opt/nvidia/nsight-compute/2024.3.2/host/linux-desktop-glibc_2_11_3-x64/Mesa:/opt/nvidia/nsight-systems/2024.6.2/host-linux-x64:/opt/nvidia/nsight-compute/2024.3.2/host/linux-desktop-glibc_2_11_3-x64/Plugins:${LD_LIBRARY_PATH:-}
+export LD_LIBRARY_PATH=/opt/nvidia/nsight-compute/2024.3.2/host/linux-desktop-glibc_2_11_3-x64/Mesa:${LD_LIBRARY_PATH:-}
 CUDA_VISIBLE_DEVICES=0 python -m feedforwardfoam.train \
   --config configs/experiments/scannetpp_scaleup_arm_a.yaml \
-  --data-root /data_ibex_c2324/data/scannetpp \
+  --data-root /data_ibex_c2324/data/scannetpp/data \
   --checkpoint checkpoints/vggt_omega_1b_512.pt
 ```
 
-Resume after interruption by adding:
-
-```bash
---resume runs/scannetpp_scaleup_arm_a_seed17/latest.pt
-```
+`--data-root` is the scene directory (`<root>/data`), not the dataset root;
+split files live one level above it. Re-running the launcher resumes
+automatically from `runs/scannetpp_scaleup_arm_a_seed17/latest.pt` when present.
 
 ## 1. Reduction decision
 

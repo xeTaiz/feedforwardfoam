@@ -23,6 +23,7 @@ from select_scannetpp_triplet import (  # pyright: ignore[reportImplicitRelative
     _load_cameras,
     _rank_candidates,
 )
+from feedforwardfoam.data.scannetpp import validate_native_camera
 
 IMAGE_PREFIX = "dslr/resized_undistorted_images"
 ANGLE_BINS = (
@@ -62,6 +63,10 @@ def _episode(scene_id: str, candidate: dict[str, Any], bin_name: str) -> dict[st
 def _select_scene_episodes(
     scene_root: Path, *, neighbors: int, episodes_per_scene: int
 ) -> list[dict[str, Any]]:
+    transforms_path = scene_root / "dslr" / "nerfstudio" / "transforms_undistorted.json"
+    # The training loader rejects scenes whose native camera breaks the centered
+    # square-pixel pinhole model, so reject them here instead of mid-run.
+    validate_native_camera(json.loads(transforms_path.read_text()))
     candidates = _rank_candidates(_load_cameras(scene_root), neighbors)
     bins: dict[str, list[dict[str, Any]]] = {name: [] for name, _, _ in ANGLE_BINS}
     for candidate in candidates:

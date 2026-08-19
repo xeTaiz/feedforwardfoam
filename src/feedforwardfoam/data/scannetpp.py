@@ -1,4 +1,5 @@
 """Audited ScanNet++ DSLR loader for one-source/held-out-view NVS."""
+
 from __future__ import annotations
 
 import argparse
@@ -12,6 +13,19 @@ from PIL import Image
 from torch.utils.data import Dataset
 
 from .types import NvsEpisode, View
+
+
+def validate_native_camera(camera: dict) -> None:
+    """Reject native ScanNet++ scenes this experiment's pinhole model cannot use."""
+    if camera.get("camera_model") != "PINHOLE":
+        raise ValueError("ScanNet++ experiment requires undistorted PINHOLE imagery")
+    width, height = int(camera["w"]), int(camera["h"])
+    if abs(float(camera["cx"]) - width / 2) > 1e-3:
+        raise ValueError("ScanNet++ principal point must be centered in x")
+    if abs(float(camera["cy"]) - height / 2) > 1e-3:
+        raise ValueError("ScanNet++ principal point must be centered in y")
+    if abs(float(camera["fl_x"]) - float(camera["fl_y"])) / float(camera["fl_x"]) > 0.01:
+        raise ValueError("ScanNet++ experiment assumes approximately square pixels")
 
 
 class ScanNetPPDataset(Dataset[NvsEpisode]):
@@ -66,7 +80,7 @@ class ScanNetPPDataset(Dataset[NvsEpisode]):
                 )
             transforms = json.loads(transforms_path.read_text())
             self.camera = transforms
-            self._validate_native_camera(transforms)
+            validate_native_camera(transforms)
             if split == "train":
                 self.frames = [frame for frame in transforms["frames"] if not frame.get("is_bad")]
             elif split in {"test", "val"}:
@@ -80,18 +94,6 @@ class ScanNetPPDataset(Dataset[NvsEpisode]):
                 f"{self.scene_id}/{split} has {len(self.frames)} views, fewer than "
                 f"{context_views + target_views} required"
             )
-
-    @staticmethod
-    def _validate_native_camera(camera: dict) -> None:
-        if camera.get("camera_model") != "PINHOLE":
-            raise ValueError("ScanNet++ experiment requires undistorted PINHOLE imagery")
-        width, height = int(camera["w"]), int(camera["h"])
-        if abs(float(camera["cx"]) - width / 2) > 1e-3:
-            raise ValueError("ScanNet++ principal point must be centered in x")
-        if abs(float(camera["cy"]) - height / 2) > 1e-3:
-            raise ValueError("ScanNet++ principal point must be centered in y")
-        if abs(float(camera["fl_x"]) - float(camera["fl_y"])) / float(camera["fl_x"]) > 0.01:
-            raise ValueError("ScanNet++ experiment assumes approximately square pixels")
 
     def __len__(self) -> int:
         return len(self.frames)
@@ -183,9 +185,7 @@ class ScanNetPPDataset(Dataset[NvsEpisode]):
             return str(self._native_image_path(frame).relative_to(self.scene_root))
         return str(frame["image"])
 
-    def episode_from_names(
-        self, context_names: list[str], target_names: list[str]
-    ) -> NvsEpisode:
+    def episode_from_names(self, context_names: list[str], target_names: list[str]) -> NvsEpisode:
         """Load one explicit, reproducible episode by scene-relative image name."""
         requested = [str(Path(name)) for name in (*context_names, *target_names)]
         if len(context_names) != self.context_views or len(target_names) != self.target_views:

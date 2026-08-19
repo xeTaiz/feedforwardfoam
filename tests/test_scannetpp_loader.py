@@ -1,5 +1,7 @@
 import json
 import math
+import sys
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -7,6 +9,8 @@ from PIL import Image
 
 from feedforwardfoam.data.multiscene import MultiSceneScanNetPP
 from feedforwardfoam.data.scannetpp import ScanNetPPDataset
+
+ROOT = Path(__file__).resolve().parents[1]
 
 
 def _write_native_scene(root, scene_id: str, views: int = 12):
@@ -243,3 +247,20 @@ def test_native_scannetpp_rejects_off_center_intrinsics(tmp_path):
             target_views=1,
             image_resolution=8,
         )
+
+
+def test_manifest_builder_rejects_scenes_the_loader_cannot_load(tmp_path):
+    scene = _write_native_scene(tmp_path, "anisotropic", views=12)
+    path = scene / "dslr" / "nerfstudio" / "transforms_undistorted.json"
+    metadata = json.loads(path.read_text())
+    metadata["fl_y"] = float(metadata["fl_x"]) * 1.5
+    path.write_text(json.dumps(metadata))
+
+    sys.path.insert(0, str(ROOT / "scripts"))
+    try:
+        from build_scannetpp_scaleup_manifest import _select_scene_episodes
+    finally:
+        sys.path.pop(0)
+
+    with pytest.raises(ValueError, match="square pixels"):
+        _select_scene_episodes(scene, neighbors=4, episodes_per_scene=1)
