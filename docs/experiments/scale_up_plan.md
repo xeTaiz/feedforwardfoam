@@ -1,22 +1,63 @@
-# Parked plan: longer training and full-dataset episode sampling
+# ScanNet++ longer-training plan and execution state
 
-Status: **parked** — recorded during the merging-strategy phase, not started.
-Owner note: dataset staging is being handled outside this document.
+Status: **ready to launch, blocked only on checkpoint placement**.
+Worker/data setup and the scene-disjoint episode manifest are complete.
 
-## 1. Why this is parked
+## Current execution state (2026-08-18)
 
-Merging/reduction strategy for multi-context proposals is being resolved first on
-fixed triplets and few-scene tests. The scale-up below should only start once a
-reduction arm is selected, because the sampling manifest and the reduction arm
-both change what a long run measures.
+- Worker: `KW60995`, 6x RTX A6000 48 GB; full ScanNet++ root:
+  `/data_ibex_c2324/data/scannetpp`.
+- Published manifest: `data/manifests/scannetpp_scaleup_v1.json`.
+  It contains 5,120 episodes from 854 training scenes and 149 episodes from
+  50 validation scenes, with no scene overlap. Training bins are balanced:
+  1,700 low-angle, 1,716 mid-angle, and 1,704 high-angle episodes. Two official
+  training scenes were skipped because they contain no usable DSLR frames.
+- Selected experiment: `configs/experiments/scannetpp_scaleup_arm_a.yaml`;
+  arm A concatenates both 80x80 proposal lattices into one 12,800-cell Foam.
+- A two-step CUDA smoke loaded the mounted scene images, built and rendered the
+  upstream Power Foam, and exited successfully on `KW60995`.
+- The trainer is single-process/single-GPU. It has no DDP implementation; a
+  claimed multi-GPU run would instead be multiple independent models. The
+  primary 50,000-step run therefore uses one GPU and keeps the other devices
+  available.
+- Launch blocker: the gated 4,576,706,117-byte
+  `vggt_omega_1b_512.pt` checkpoint is not present on `KW60995`. Hugging Face
+  download returned access denied. The existing copy on `KW60996` is outside
+  every path that worker advertises to `wh_dispatch data_copy`, so the harness
+  correctly refuses the transfer.
+
+Once the checkpoint exists at
+`/code/feedforwardfoam-scaleup/checkpoints/vggt_omega_1b_512.pt`, launch with:
+
+```bash
+cd /code/feedforwardfoam-scaleup
+source .venv-powerfoam/bin/activate
+export LD_LIBRARY_PATH=/opt/nvidia/nsight-compute/2024.3.2/host/linux-desktop-glibc_2_11_3-x64/Mesa:/opt/nvidia/nsight-systems/2024.6.2/host-linux-x64:/opt/nvidia/nsight-compute/2024.3.2/host/linux-desktop-glibc_2_11_3-x64/Plugins:${LD_LIBRARY_PATH:-}
+CUDA_VISIBLE_DEVICES=0 python -m feedforwardfoam.train \
+  --config configs/experiments/scannetpp_scaleup_arm_a.yaml \
+  --data-root /data_ibex_c2324/data/scannetpp \
+  --checkpoint checkpoints/vggt_omega_1b_512.pt
+```
+
+Resume after interruption by adding:
+
+```bash
+--resume runs/scannetpp_scaleup_arm_a_seed17/latest.pt
+```
+
+## 1. Reduction decision
+
+The fixed-triplet reduction study is complete. Arm A remains the measured
+quality ceiling; fixed-budget world-space reduction and containment merging do
+not justify delaying the scene-disjoint run.
 
 ## 2. Compute inventory (measured 2026-08-18)
 
 | Worker | GPUs | Notes |
 |---|---|---|
-| `KW60996` | 4× RTX A6000 48 GB | idle at inspection; existing project checkout `/code/feedforwardfoam-project`, plus `/code/feedforwardfoam-abc` |
-| `KW60995` | 3× RTX A6000 48 GB | ~15 GB/GPU already in use by other work |
-| `KW60898` | 1× RTX 6000 Ada 48 GB | shared multi-tenant box; **holds the ScanNet++ data**; exec calls were failing/timing out at inspection |
+| `KW60996` | 4× RTX A6000 48 GB | idle after the fixed-triplet jobs; holds the only accessible checkpoint copy, but advertises no transferable data paths |
+| `KW60995` | 6× RTX A6000 48 GB | selected scale-up worker; full dataset mounted and environment bootstrapped |
+| `KW60898` | 1× RTX 6000 Ada 48 GB | shared multi-tenant box; older partial ScanNet++ paths |
 | `gpu210-02` | 1× Tesla V100 32 GB | **no data paths bound** |
 | `KW61627` | 2× RTX PRO 6000 Blackwell 96 GB | busy with unrelated DRRT work |
 | `KW61633` | 1× RTX A2000 12 GB | too small |
@@ -25,58 +66,37 @@ both change what a long run measures.
 There is **no multi-V100 machine with the full dataset**. The only V100 is
 `gpu210-02` and it has nothing mounted.
 
-## 3. Dataset locations (partially verified)
+## 3. Dataset location (verified)
 
-On `KW60898`:
+`KW60995` mounts the official ScanNet++ tree at
+`/data_ibex_c2324/data/scannetpp`. Its NVS split files contain 856 training,
+50 validation, and 50 test scenes. The manifest builder loaded native
+`dslr/nerfstudio/transforms_undistorted.json` metadata and native resized DSLR
+images from this tree. The official test scenes remain excluded from training
+and model selection.
 
-- `/data_ibex/scannetpp_pf` — 395 entries; consistent with a full ScanNet++ scene
-  set. **Per-scene structure and total size unverified** (exec calls to that
-  mount failed repeatedly during inspection).
-- `/data_local/scannetpp_preproc` — contains `train/`, `val/`, `test/`.
-  Split contents unverified.
-- `/data_local/scannetpp` — 3 entries, 4.9 GB. Small subset only.
+## 4. Episode sampling decision
 
-Current staged pilot data (4 scenes, 743 MB) lives on `KW60996` at
-`/code/feedforwardfoam-project/data/staged/scannetpp_p0`.
+The manifest uses calibrated pose constraints only: target between contexts,
+baseline ratio `[0.5, 2.5]`, perpendicular fraction at most `0.20`, and maximum
+view-angle bins `[3°, 8°)`, `[8°, 16°)`, and `[16°, 25°)`. It balances those bins
+within each scene and across the split.
 
-Transfer path when needed: `wh_dispatch data_copy` from `KW60898` to `KW60996`.
+Target-observable fraction remains depth-derived and is not mislabeled as a
+pose metric. Computing it for every candidate before training would require
+VGGT inference over the full dataset. Instead, fixed validation computes actual
+projected support from decoded depth and reports full-frame and support metrics
+for each pose bin. This preserves the measurement without leaking a costly,
+uncalibrated pose proxy into candidate selection.
 
-## 4. Episode sampling — required calibration before any manifest is built
-
-The two quantities that best predicted support PSNR in the 4-triplet study were
-target-observable fraction (`r = +0.95`) and maximum view angle (`r = -0.82`).
-
-**Constraint that blocks a naive full-dataset scan:** target-observable fraction
-is *not* a pose-only quantity. It is defined by projecting VGGT depth anchors
-into the target and dilating by two target pixels
-(`docs/experiments/scannetpp_fixed_triplet_overfit.md`). It cannot be derived
-from camera poses alone, so `select_scannetpp_triplet.py`'s geometry math cannot
-produce it.
-
-Two options, both requiring work before a 395-scene scan:
-
-1. **Depth-based obs, run for real.** Requires a VGGT forward pass per candidate
-   triple — expensive, but exact and directly comparable to recorded numbers.
-2. **Pose-only frustum-overlap proxy.** Cheap, but the existing
-   `obs < 0.6` / `angle > 30°` reject thresholds are **not transferable** to it;
-   they were derived from the depth-based metric.
-
-**Prerequisite for option 2:** compute the proxy on the 12 stratified triplets
-(and the 4 earlier random/top triplets) where depth-based `obs` is already
-recorded, check the proxy actually correlates with the recorded `obs`, and derive
-the reject cut from that calibration. Only then scan the full dataset.
-
-Also note: the `q05…q90` bins in the stratified manifest are **selector-score**
-quantiles, not overlap quantiles. Measured `obs` is non-monotonic in `q`
-(`f939`: q05 = 0.99, q90 = 0.80; `fd`: q05 = 0.85, q90 = 0.93). Do not treat the
-`q` axis as an overlap axis, and do not derive a sampling policy from it. Bin on
-measured quantities directly.
+The older `q05…q90` labels remain selector-score quantiles, not overlap
+quantiles; they are not used by this manifest.
 
 ## 5. Planned long-run shape
 
-- Scene-disjoint split across the largest verified scene set.
-- Overlap-aware sampling from the calibrated manifest: reject near-empty coverage
-  and near-degenerate parallax; balance the remaining bins.
+- Scene-disjoint official ScanNet++ training and validation splits.
+- Pose-constrained episodes balanced across low-, mid-, and high-angle bins;
+  projected support is measured, not approximated, during validation.
 - Reduction arm: arm A (all-proposal concatenation, no reduction). Arms B–E are
   all worse at a reduced budget, and the two world-space follow-ups (D fps,
   E confidence voxel) were measured and rejected — see
@@ -85,19 +105,16 @@ measured quantities directly.
   reduction arm beats arm B.
 - Retain `best_full.pt` / `best_support.pt`; cosine LR.
 
-## 6. Scale-up readiness checks still outstanding
+## 6. Remaining interpretation safeguards
 
-- **Depth-gauge saturation is confirmed and material.** On the 12 stratified
-  triplets, 4 of 12 end with `depth_alignment_scale` pinned at the upper bound
-  4.0000 (`00a_q90`, `f939_q05`, `f939_q60`, `fd_q30`), and two more exceed 2.5.
-  The predicted/calibrated baseline ratio leaves the assumed `[0.25, 4]` range
-  for a third of the matrix. Diagnose before scale-up; a clipped gauge silently
-  mis-scales every proposal in those episodes.
-- Fixed validation bins by measured overlap / angle / coverage.
-- Visualization bundles for best checkpoints.
-- Registers-only two-context control on the stratified set. Section 5.7 tabulates
-  only `initialization` / `appearance` / `full`; the registers-only control named
-  in the decision gate is not yet in that table.
+- Depth-gauge clipping remains material. Training now logs both the unclamped
+  `depth_alignment_raw_scale` and `depth_alignment_bound_hit`; validation
+  reports the bound-hit rate. Treat episodes that hit `[0.25, 4]` as suspect
+  rather than silently interpreting them as valid geometry.
+- Fixed per-bin validation, support metrics, and render bundles are implemented.
+- The registers-only two-context control is still absent from the stratified
+  table. It does not block this exploratory scale-up, but it remains required
+  before attributing a scene-disjoint gain specifically to pixel-aligned fusion.
 
 ## 7. Deferred
 
