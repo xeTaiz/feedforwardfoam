@@ -3,19 +3,21 @@
 Status: **running** — arm A scale-up training launched on `KW60995`.
 Worker/data setup and the scene-disjoint episode manifest are complete.
 
-## Current execution state (2026-08-18)
+## Current execution state (2026-08-19)
 
-- Worker: `KW60995`, 6x RTX A6000 48 GB; full ScanNet++ root:
-  `/data_ibex_c2324/data/scannetpp`.
+- Worker: `KW60995`, 3x RTX A6000 48 GB visible; full ScanNet++ root:
+  `/data_ibex_c2324/data/scannetpp`. GPU 0 runs this job at about 5.1 GB.
 - Published manifest: `data/manifests/scannetpp_scaleup_v1.json`.
-  It contains 5,120 episodes from 854 training scenes and 149 episodes from
+  It contains 5,108 episodes from 852 training scenes and 149 episodes from
   50 validation scenes, with no scene overlap. Training bins are balanced:
-  1,700 low-angle, 1,716 mid-angle, and 1,704 high-angle episodes. Two official
-  training scenes were skipped because they contain no usable DSLR frames.
+  1,696 low-angle, 1,712 mid-angle, and 1,700 high-angle episodes. Four official
+  training scenes were skipped: two contain no usable DSLR frames, and two use
+  non-square pixels that this experiment's centered pinhole model rejects.
+  The builder now applies the loader's own camera check and confirms that every
+  selected view file exists, so a manifest cannot fail mid-run as the first
+  launch did.
 - Selected experiment: `configs/experiments/scannetpp_scaleup_arm_a.yaml`;
   arm A concatenates both 80x80 proposal lattices into one 12,800-cell Foam.
-- A two-step CUDA smoke loaded the mounted scene images, built and rendered the
-  upstream Power Foam, and exited successfully on `KW60995`.
 - The trainer is single-process/single-GPU. It has no DDP implementation; a
   claimed multi-GPU run would instead be multiple independent models. The
   primary 50,000-step run therefore uses one GPU and keeps the other devices
@@ -40,6 +42,32 @@ CUDA_VISIBLE_DEVICES=0 python -m feedforwardfoam.train \
 `--data-root` is the scene directory (`<root>/data`), not the dataset root;
 split files live one level above it. Re-running the launcher resumes
 automatically from `runs/scannetpp_scaleup_arm_a_seed17/latest.pt` when present.
+
+## Observed run state
+
+Job `d48642b1-23a4-4a17-947c-dbd022685dc0` (`wh_fffoam-scaleup-a3`) started at
+17:18 on repo commit `07e3b25` and reached step 1,000 at 17:35, so about one
+step per second and roughly 14 hours for 50,000 steps. `active_cells` stays at
+12,800 for every logged step, confirming arm A keeps both full proposal sets.
+
+First scene-disjoint validation (step 1,000, 18 episodes, untrained-scene
+targets):
+
+| Bin | val PSNR | support PSNR | coverage | gauge bound hits |
+|---|---:|---:|---:|---:|
+| all | 17.91 | 18.21 | 0.989 | 0.333 |
+| low_angle | 18.94 | 18.97 | 0.995 | 0.500 |
+| mid_angle | 17.27 | 17.73 | 0.987 | 0.167 |
+| high_angle | 17.69 | 18.01 | 0.985 | 0.333 |
+
+`best_full.pt`, `best_support.pt`, `latest.pt`, per-bin validation renders, and
+diagnostic renders are all being written.
+
+**Depth-gauge clipping is the leading open risk.** One third of validation
+episodes hit the `[0.25, 4]` clamp at step 1,000, and training logs raw scales
+as high as 6.98 and as low as 0.21. Those episodes are mis-scaled before the
+head sees them, so treat their metrics as suspect and fix the gauge before
+reading this run as a statement about achievable quality.
 
 ## 1. Reduction decision
 
