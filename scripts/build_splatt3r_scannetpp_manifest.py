@@ -23,7 +23,7 @@ def _read_scene_ids(path: Path) -> list[str]:
 
 
 def _protocol_frame_names(scene_root: Path, image_directory: str) -> list[str]:
-    dataset = ScanNetPPDataset(
+    _ = ScanNetPPDataset(
         scene_root,
         split="train",
         context_views=2,
@@ -32,13 +32,9 @@ def _protocol_frame_names(scene_root: Path, image_directory: str) -> list[str]:
         image_resolution=256,
     )
     ordered_names = json.loads((scene_root / "dslr" / "train_test_lists.json").read_text())["train"]
-    native_frames = {Path(frame["file_path"]).name: frame for frame in dataset.frames}
-    missing = [name for name in ordered_names if Path(name).name not in native_frames]
-    if missing:
-        raise ValueError(f"Native metadata is missing protocol frames: {missing[:3]}")
     # The published fixed tuple files index the unfiltered train-list order.
     # Filtering is_bad here makes valid published indices exceed the list.
-    return [dataset._frame_name(native_frames[Path(name).name]) for name in ordered_names]
+    return [str(Path("dslr") / image_directory / Path(name).name) for name in ordered_names]
 
 
 def build_manifest(
@@ -86,11 +82,16 @@ def build_manifest(
             indices = [int(context_0), int(context_1), int(target)]
             if any(index < 0 or index >= len(names) for index in indices):
                 raise ValueError(f"Splatt3R tuple index is out of range for {scene_id}: {indices}")
+            selected_names = [names[index] for index in indices]
+            if any(not (scene_root / scene_id / name).is_file() for name in selected_names):
+                raise FileNotFoundError(
+                    f"Splatt3R tuple references a missing image in {scene_id}: {selected_names}"
+                )
             validation.append(
                 {
                     "scene_id": scene_id,
-                    "context_names": [names[indices[0]], names[indices[1]]],
-                    "target_names": [names[indices[2]]],
+                    "context_names": selected_names[:2],
+                    "target_names": selected_names[2:],
                     "bin": label,
                 }
             )
