@@ -81,16 +81,14 @@ not justify delaying the scene-disjoint run.
 
 | Worker | GPUs | Notes |
 |---|---|---|
-| `KW60996` | 4× RTX A6000 48 GB | idle after the fixed-triplet jobs; holds the only accessible checkpoint copy, but advertises no transferable data paths |
-| `KW60995` | 3× RTX A6000 48 GB | full dataset mounted; previous run environment remains |
+| `KW60996` | 4× RTX A6000 48 GB | idle; no dataset path advertised |
+| `KW60995` | 3× RTX A6000 48 GB | full dataset and verified checkpoint at `/code/feedforwardfoam-scaleup/checkpoints/vggt_omega_1b_512.pt` |
 | `KW60898` | 1× RTX 6000 Ada 48 GB | shared multi-tenant box; full dataset is reachable through the IBEX mount |
-| `gpu210-02` | 1× Tesla V100 32 GB | **no data paths bound** |
-| `KW61627` | 2× RTX PRO 6000 Blackwell 96 GB | busy with unrelated DRRT work |
+| V100 pool | single Tesla V100 32 GB nodes | idle GPUs; no dataset path advertised by Worker Harness |
 | `KW61633` | 1× RTX A2000 12 GB | too small |
-| `archdome` | 1× RTX 3090 24 GB | offline at inspection |
 
-There is **no multi-V100 machine with the full dataset**. The only V100 is
-`gpu210-02` and it has nothing mounted.
+There is no multi-V100 worker. Several independent single-V100 workers are
+registered, but none advertises a transferable dataset path.
 
 ## 3. Dataset location (verified)
 
