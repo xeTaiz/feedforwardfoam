@@ -165,7 +165,7 @@ class PowerFoamRendererBridge:
         # requirement during their backward pass.
         return FoamRender(
             rgb=_with_contiguous_backward(result[0]),
-            alpha=_with_contiguous_backward(result[1]),
+            alpha=result[1],
             normal=_with_contiguous_backward(result[3]),
-            depth=_with_contiguous_backward(result[4]),
+            depth=result[4],
         )
