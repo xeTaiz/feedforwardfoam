@@ -1,4 +1,5 @@
 """Thin, non-forking bridge to the pinned Power Foam subrepository."""
+
 from __future__ import annotations
 
 import importlib
@@ -23,7 +24,9 @@ def require_powerfoam() -> None:
     """Make the pinned subrepository importable without copying upstream code."""
     source = _repo_root() / "external" / "powerfoam"
     if not source.exists():
-        raise RuntimeError("Missing external/powerfoam; run git submodule update --init --recursive")
+        raise RuntimeError(
+            "Missing external/powerfoam; run git submodule update --init --recursive"
+        )
     if str(source) not in sys.path:
         sys.path.insert(0, str(source))
     try:
@@ -95,6 +98,13 @@ def camera_from_view(view: View, device: torch.device | str):
     )
 
 
+def _with_contiguous_backward(tensor: torch.Tensor) -> torch.Tensor:
+    """Make downstream HWC/CHW views safe for Warp's contiguous-array bridge."""
+    if tensor.requires_grad:
+        tensor.register_hook(lambda gradient: gradient.contiguous())
+    return tensor
+
+
 @dataclass
 class FoamRender:
     rgb: torch.Tensor
@@ -150,5 +160,12 @@ class PowerFoamRendererBridge:
 
     def render(self, parameters: FoamParameters, camera) -> FoamRender:
         result = self.build(parameters).forward(camera)
-        # Upstream ordering: RGB, alpha/transmittance auxiliaries, normal, depth.
-        return FoamRender(rgb=result[0], alpha=result[1], normal=result[3], depth=result[4])
+        # Warp requires the incoming adjoints to have contiguous inner dimensions.
+        # Perceptual losses transpose HWC renders to CHW and otherwise violate that
+        # requirement during their backward pass.
+        return FoamRender(
+            rgb=_with_contiguous_backward(result[0]),
+            alpha=_with_contiguous_backward(result[1]),
+            normal=_with_contiguous_backward(result[3]),
+            depth=_with_contiguous_backward(result[4]),
+        )

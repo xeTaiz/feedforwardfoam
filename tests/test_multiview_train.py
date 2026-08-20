@@ -7,6 +7,7 @@ import feedforwardfoam.train as train_module
 from feedforwardfoam.backbone import FrozenGeometryStub
 from feedforwardfoam.data.types import NvsEpisode, View
 from feedforwardfoam.head import CanonicalPowerFoamHead
+from feedforwardfoam.renderer import _with_contiguous_backward
 from feedforwardfoam.train import _episode_objective, _metrics, _predict, _triplet_geometry
 
 
@@ -17,6 +18,25 @@ def _view(value: float) -> View:
         fov_x_radians=0.7,
         name=str(value),
     )
+
+
+def test_renderer_contiguizes_transposed_loss_gradient():
+    observed: list[bool] = []
+
+    class CaptureGradient(torch.autograd.Function):
+        @staticmethod
+        def forward(ctx, tensor):
+            return tensor.clone()
+
+        @staticmethod
+        def backward(ctx, gradient):
+            observed.append(gradient.is_contiguous())
+            return gradient
+
+    source = torch.rand(4, 5, 3, requires_grad=True)
+    rendered = _with_contiguous_backward(CaptureGradient.apply(source))
+    rendered.permute(2, 0, 1).sum().backward()
+    assert observed == [True]
 
 
 def test_triplet_geometry_detects_midpoint_target():
