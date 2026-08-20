@@ -188,6 +188,26 @@ python scripts/render_scannetpp_depths.py \
   --scene-list /data_ibex_c2324/data/scannetpp/splits/nvs_sem_val.txt
 ```
 
+The rendering pass can be distributed over workers sharing the dataset by
+assigning disjoint `--shard-index 0..N-1 --num-shards N` values. All shards
+write the same resumable output tree. After the shards finish,
+`scripts/run_scannetpp_splatt3r.sh` verifies/skips every completed depth,
+rebuilds the manifest, verifies the gated checkpoint byte-for-byte, and resumes
+or starts training.
+
+### Deployment state
+
+No A100 worker is registered. The available dedicated nodes are single 32 GB
+V100s with no advertised transferable data paths; `KW60995` has three idle
+48 GB A6000s and the full dataset mount. Direct inspection found the raw images,
+camera metadata, and meshes there, but no rendered depth directory.
+
+No job has been launched yet. Worker Harness `exec` fails immediately on both
+`KW60995` and a V100 even after worker-container restarts, and Pi delegation
+returns HTTP 500 before creating a session. Starting training without the depth
+pass would silently change the requested Splatt3R mask protocol; it is therefore
+intentionally blocked rather than replaced with predicted-depth masks.
+
 The renderer uses Nerfstudio OpenGL camera-to-world poses directly, scales
 intrinsics to the resized image dimensions, applies the published anonymous
 pixel mask convention, rejects empty renders, writes atomically, and skips

@@ -147,6 +147,8 @@ def main() -> None:
     parser.add_argument("--depth-directory", default="resized_undistorted_depths")
     parser.add_argument("--pyopengl-platform", default="egl")
     parser.add_argument("--overwrite", action="store_true")
+    parser.add_argument("--num-shards", type=int, default=1)
+    parser.add_argument("--shard-index", type=int, default=0)
     parser.add_argument("--max-scenes", type=int)
     parser.add_argument("--max-frames", type=int)
     args = parser.parse_args()
@@ -157,10 +159,20 @@ def main() -> None:
     except ImportError as error:
         raise RuntimeError("Install pyrender and trimesh to render ScanNet++ depths") from error
 
-    scenes = _scene_ids(args.scene_list)
+    if args.num_shards <= 0:
+        raise ValueError("--num-shards must be positive")
+    if not 0 <= args.shard_index < args.num_shards:
+        raise ValueError("--shard-index must be in [0, --num-shards)")
+    scenes = _scene_ids(args.scene_list)[args.shard_index :: args.num_shards]
     if args.max_scenes is not None:
         scenes = scenes[: args.max_scenes]
-    totals = {"scenes": 0, "rendered": 0, "skipped": 0}
+    totals = {
+        "scenes": 0,
+        "rendered": 0,
+        "skipped": 0,
+        "shard_index": args.shard_index,
+        "num_shards": args.num_shards,
+    }
     for index, scene_id in enumerate(scenes, start=1):
         rendered, skipped = render_scene(
             args.data_root / scene_id,
