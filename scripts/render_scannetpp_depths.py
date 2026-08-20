@@ -45,6 +45,27 @@ def _mesh_as_trimesh(path: Path, trimesh_module: Any) -> Any:
     return loaded
 
 
+def _mesh_in_nerfstudio_coordinates(mesh: Any, metadata: dict[str, Any]) -> Any:
+    expected_bounds = metadata.get("aabb_range")
+    if expected_bounds is None:
+        return mesh
+    expected = np.asarray(expected_bounds, dtype=np.float64)
+    if np.allclose(mesh.bounds, expected, atol=1e-3):
+        return mesh
+    # ScanNet++ exports meshes as (x, y, z), while its Nerfstudio DSLR poses
+    # and aabb_range use (y, x, -z).
+    transform = np.eye(4, dtype=np.float64)
+    transform[:3, :3] = np.asarray([[0.0, 1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, -1.0]])
+    aligned = mesh.copy()
+    aligned.apply_transform(transform)
+    if not np.allclose(aligned.bounds, expected, atol=1e-3):
+        raise ValueError(
+            "ScanNet++ mesh bounds do not match Nerfstudio aabb_range after "
+            f"coordinate conversion: {aligned.bounds} versus {expected}"
+        )
+    return aligned
+
+
 def _invalidate_anonymous_pixels(
     depth: NDArray[np.float32], mask_path: Path
 ) -> NDArray[np.float32]:
@@ -82,7 +103,9 @@ def render_scene(
     depth_root.mkdir(parents=True, exist_ok=True)
     mask_root = dslr_root / "resized_undistorted_masks"
     mesh_path = scene_root / "scans" / "mesh_aligned_0.05.ply"
-    mesh = pyrender.Mesh.from_trimesh(_mesh_as_trimesh(mesh_path, trimesh), smooth=False)
+    scene_mesh = _mesh_as_trimesh(mesh_path, trimesh)
+    scene_mesh = _mesh_in_nerfstudio_coordinates(scene_mesh, metadata)
+    mesh = pyrender.Mesh.from_trimesh(scene_mesh, smooth=False)
     render_scene = pyrender.Scene()
     render_scene.add(mesh)
     renderer = pyrender.OffscreenRenderer(1, 1)
