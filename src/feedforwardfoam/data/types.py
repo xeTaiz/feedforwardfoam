@@ -18,6 +18,7 @@ class View:
     fov_x_radians: float
     name: str
     alpha: torch.Tensor | None = None
+    depth: torch.Tensor | None = None
 
 
 @dataclass(frozen=True)

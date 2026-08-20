@@ -31,7 +31,7 @@ def test_single_context_depth_alignment_is_identity():
     assert transform.samples == 0
 
 
-def test_depth_alignment_reports_clipping_without_changing_guard():
+def test_depth_alignment_does_not_clip_valid_scene_scale():
     predicted_c2w = torch.eye(4).repeat(1, 2, 1, 1)
     predicted_c2w[0, 1, 0, 3] = 0.1
     features = {
@@ -40,6 +40,6 @@ def test_depth_alignment_reports_clipping_without_changing_guard():
     }
     aligned, transform = align_depths_to_calibrated_cameras(features, (_view(0.0), _view(2.0)))
     assert torch.allclose(transform.raw_scale, torch.tensor(20.0))
-    assert torch.allclose(transform.scale, torch.tensor(4.0))
-    assert transform.bound_hit
-    assert torch.allclose(aligned, torch.full_like(aligned, 4.0))
+    assert torch.allclose(transform.scale, torch.tensor(20.0))
+    assert not transform.bound_hit
+    assert torch.allclose(aligned, torch.full_like(aligned, 20.0))

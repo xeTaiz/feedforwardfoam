@@ -1,7 +1,11 @@
 import torch
 
 from feedforwardfoam.data.types import View
-from feedforwardfoam.fusion import project_world_points, world_points_from_z_depth
+from feedforwardfoam.fusion import (
+    laser_context_support_mask,
+    project_world_points,
+    world_points_from_z_depth,
+)
 
 
 def _view(translation=(0.0, 0.0, 0.0)) -> View:
@@ -30,3 +34,15 @@ def test_support_projection_changes_with_camera_translation():
     grid, _, valid = project_world_points(points, support, "cpu")
     assert valid.any()
     assert grid[2, 2, 0] < 0
+
+
+def test_laser_support_requires_matching_context_depth():
+    c2w = torch.eye(4)
+    depth = torch.full((5, 5), 2.0)
+    context = View(torch.zeros(5, 5, 3), c2w, 1.0, "context", depth=depth)
+    target_depth = depth.clone()
+    target_depth[2, 2] = 0.0
+    target = View(torch.zeros(5, 5, 3), c2w, 1.0, "target", depth=target_depth)
+    mask = laser_context_support_mask((context,), target, "cpu")
+    assert mask[1, 1]
+    assert not mask[2, 2]

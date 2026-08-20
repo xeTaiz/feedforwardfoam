@@ -1,0 +1,76 @@
+seed: 17
+output_dir: runs/scannetpp_splatt3r_256_arm_a_seed17
+backbone:
+  checkpoint: null
+  image_resolution: 256
+  allow_stub_backbone: false
+baseline:
+  type: gaussian
+  rasterize_mode: classic
+  eps2d: 0.3
+  radius_clip: 0.0
+  tile_size: 16
+  bkgd_color: [0.0, 0.0, 0.0]
+head:
+  max_cells: 131072
+  num_texel_sites: 8
+  spherical_voronoi_dof: 8
+  hidden_dim: 256
+  radius_mode: pixel_footprint
+  radius_scale_init: 1.25
+  radius_residual_log_scale: 0.25
+  density_mode: fixed
+  fixed_density: 10000.0
+  initialize_rgb_from_image: true
+  initialize_normals_from_depth: true
+  base_depth_mode: predicted
+  point_residual_scale: 0.02
+  normal_residual_radians: 0.25
+  rgb_residual_scale: 1.0
+  fusion_mode: projected
+  proposal_views: all
+  proposal_reduction: all
+  selection_mode: uniform
+renderer:
+  render_objective: volume
+  is_pinhole: true
+  bkgd_color: [0.0, 0.0, 0.0]
+data:
+  dataset: scannetpp
+  scene_manifest: data/manifests/scannetpp_splatt3r_v1.json
+  coverage_root: data/splatt3r/scannetpp/coverage
+  context_views: 2
+  target_views: 4
+  validation_target_views: 1
+  target_pool_size: null
+  context_overlap_threshold: 0.5
+  target_overlap_threshold: 0.6
+  native_image_directory: resized_undistorted_images
+  resize_mode: lanczos
+  load_depth: true
+  image_downsample: 1
+train:
+  steps: 500000
+  scene_batch_size: 12
+  learning_rate: 1.0e-05
+  learning_rate_schedule: half_decay
+  weight_decay: 0.05
+  gradient_clip_norm: 0.5
+  rgb_loss: mse
+  lpips_loss_weight: 0.25
+  alpha_loss_weight: 0.0
+  splatt3r_masked_rgb_reduction: true
+  log_every: 10
+  validate_every: 5000
+  checkpoint_every: 1000
+  validation_episodes: 40
+  validation_render_bundles: true
+  resample_episodes: true
+  target_from_context: false
+  visibility_mask: true
+  support_mask_source: laser
+  support_mask_contexts: all
+  visibility_mask_dilation: 0
+  diagnostic_render_every: 5000
+  report_support_metrics: true
+  report_benchmark_metrics: true

@@ -45,8 +45,8 @@ def align_depths_to_calibrated_cameras(
     features: dict[str, torch.Tensor],
     context_views: tuple[View, ...],
     *,
-    minimum_scale: float = 0.25,
-    maximum_scale: float = 4.0,
+    minimum_scale: float = 1e-6,
+    maximum_scale: float = 1e6,
 ) -> tuple[torch.Tensor, DepthAlignment]:
     """Scale VGGT depth into the calibrated scene gauge using camera baselines.
 
@@ -81,17 +81,22 @@ def align_depths_to_calibrated_cameras(
     calibrated_centers = torch.stack([view.c2w[:3, 3].to(depths) for view in context_views])
     predicted_distances = torch.pdist(predicted_centers)
     calibrated_distances = torch.pdist(calibrated_centers)
-    valid = (predicted_distances > 1e-6) & torch.isfinite(predicted_distances)
+    valid = (
+        (predicted_distances > 1e-8)
+        & torch.isfinite(predicted_distances)
+        & torch.isfinite(calibrated_distances)
+    )
     ratios = calibrated_distances[valid] / predicted_distances[valid]
     raw_scale = ratios.median() if ratios.numel() else torch.ones((), device=depths.device)
-    scale = raw_scale.clamp(minimum_scale, maximum_scale)
-    aligned = (depths * scale).clamp_min(1e-3)
+    if not torch.isfinite(raw_scale) or not minimum_scale <= float(raw_scale) <= maximum_scale:
+        raise ValueError(f"Invalid calibrated depth-gauge scale: {float(raw_scale):.6g}")
+    aligned = (depths * raw_scale).clamp_min(1e-3)
     return aligned, DepthAlignment(
-        scale=scale,
+        scale=raw_scale,
         raw_scale=raw_scale,
         offset=torch.zeros((), device=depths.device),
         samples=int(ratios.numel()),
-        bound_hit=bool(raw_scale < minimum_scale or raw_scale > maximum_scale),
+        bound_hit=False,
     )
 
 
@@ -223,3 +228,37 @@ def projected_context_support_mask(
         kernel = 2 * dilation + 1
         mask = F.max_pool2d(mask, kernel, stride=1, padding=dilation)
     return mask[0, 0].bool()
+
+
+def laser_context_support_mask(
+    context_views: tuple[View, ...],
+    target_view: View,
+    device: torch.device | str,
+    *,
+    absolute_depth_tolerance: float = 0.1,
+) -> torch.Tensor:
+    """Splatt3R support: target laser points visible in either context laser depth."""
+    if target_view.depth is None or any(view.depth is None for view in context_views):
+        raise ValueError("Laser support masks require depth maps on every context and target view")
+    target_depth = target_view.depth.to(device=device, dtype=torch.float32)
+    target_points = world_points_from_z_depth(target_view, target_depth, device)
+    supported = torch.zeros_like(target_depth, dtype=torch.bool)
+    for context_view in context_views:
+        assert context_view.depth is not None
+        grid, projected_depth, in_frustum = project_world_points(
+            target_points, context_view, device
+        )
+        context_depth = context_view.depth.to(device=device, dtype=torch.float32)
+        sampled_depth = F.grid_sample(
+            context_depth[None, None],
+            grid[None],
+            mode="bilinear",
+            padding_mode="zeros",
+            align_corners=False,
+        )[0, 0]
+        supported |= (
+            in_frustum
+            & (sampled_depth > 1e-6)
+            & torch.isclose(projected_depth, sampled_depth, atol=absolute_depth_tolerance, rtol=0)
+        )
+    return supported & (target_depth > 1e-6)

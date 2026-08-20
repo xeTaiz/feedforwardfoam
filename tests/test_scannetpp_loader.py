@@ -40,6 +40,11 @@ def _write_native_scene(root, scene_id: str, views: int = 12):
         "test_frames": frames[-4:],
     }
     (metadata_dir / "transforms_undistorted.json").write_text(json.dumps(metadata))
+    (scene / "dslr" / "train_test_lists.json").write_text(
+        json.dumps({"train": [frame["file_path"] for frame in frames], "test": []})
+    )
+    raw_metadata = {"frames": [dict(frame, is_bad=False) for frame in frames]}
+    (metadata_dir / "transforms.json").write_text(json.dumps(raw_metadata))
     return scene
 
 
@@ -58,6 +63,51 @@ def test_native_scannetpp_center_crops_and_samples_multiple_targets(tmp_path):
     assert len(set(names)) == 5
     assert episode.context[0].image.shape == (8, 8, 3)
     assert episode.context[0].fov_x_radians == pytest.approx(2 * math.atan(3 / 8))
+
+
+def test_native_scannetpp_fov_uses_camera_units_for_scaled_images(tmp_path):
+    scene = _write_native_scene(tmp_path, "scaled")
+    image_path = scene / "dslr" / "resized_undistorted_images" / "frame_000.JPG"
+    Image.fromarray(np.zeros((12, 20, 3), dtype=np.uint8)).save(image_path)
+    dataset = ScanNetPPDataset(
+        scene,
+        split="train",
+        context_views=1,
+        target_views=1,
+        image_resolution=8,
+    )
+    assert dataset.episode_from_indices([0, 1]).context[0].fov_x_radians == pytest.approx(
+        2 * math.atan(3 / 8)
+    )
+
+
+def test_splatt3r_overlap_sampler_uses_coverage_and_four_targets(tmp_path):
+    scene = _write_native_scene(tmp_path, "overlap")
+    coverage = np.full((12, 12), 0.8, dtype=np.float32)
+    np.fill_diagonal(coverage, 1.0)
+    coverage_path = tmp_path / "overlap.json"
+    coverage_path.write_text(json.dumps({"overlap": coverage.tolist()}))
+    dataset = ScanNetPPDataset(
+        scene,
+        split="train",
+        context_views=2,
+        target_views=4,
+        image_resolution=8,
+        overlap_path=coverage_path,
+        context_overlap_threshold=0.5,
+        target_overlap_threshold=0.6,
+        seed=13,
+    )
+    state = dataset.generator.get_state()
+    first = dataset.sample_episode()
+    dataset.generator.set_state(state)
+    repeated = dataset.sample_episode()
+    assert len(first.context) == 2
+    assert len(first.target) == 4
+    assert len({view.name for view in first.context + first.target}) == 6
+    assert [view.name for view in first.context + first.target] == [
+        view.name for view in repeated.context + repeated.target
+    ]
 
 
 def test_multiscene_split_sampling_and_state_roundtrip(tmp_path):
@@ -127,6 +177,7 @@ def test_multiscene_explicit_episodes_preserve_triplets_and_balance_bins(tmp_pat
                 "val": [
                     entry("val-a", "low_angle", 0),
                     entry("val-b", "mid_angle", 3),
+                    entry("val-a", "low_angle", 6),
                 ],
             }
         )
@@ -169,6 +220,12 @@ def test_multiscene_explicit_episodes_preserve_triplets_and_balance_bins(tmp_pat
         "mid_angle",
     ]
     assert all(len(episode.context) == 2 for _, episode in records)
+    exhaustive = validation.all_episode_records()
+    assert [label for label, _ in exhaustive] == [
+        "low_angle",
+        "mid_angle",
+        "low_angle",
+    ]
 
 
 def test_native_scannetpp_loads_explicit_named_triplet(tmp_path):
@@ -264,3 +321,43 @@ def test_manifest_builder_rejects_scenes_the_loader_cannot_load(tmp_path):
 
     with pytest.raises(ValueError, match="square pixels"):
         _select_scene_episodes(scene, neighbors=4, episodes_per_scene=1)
+
+
+def test_splatt3r_manifest_builder_preserves_every_fixed_bin_tuple(tmp_path):
+    _write_native_scene(tmp_path, "train-a")
+    _write_native_scene(tmp_path, "val-a")
+    split_root = tmp_path / "splits"
+    split_root.mkdir()
+    (split_root / "nvs_sem_train.txt").write_text("train-a\n")
+    (split_root / "nvs_sem_val.txt").write_text("val-a\n")
+    coverage_root = tmp_path / "coverage"
+    coverage_root.mkdir()
+    (coverage_root / "train-a.json").write_text("{}")
+    assets = tmp_path / "assets"
+    assets.mkdir()
+    for thresholds in ("0.9_0.9", "0.7_0.7", "0.5_0.5", "0.3_0.3"):
+        (assets / f"splatt3r_scannetpp_test_{thresholds}.json").write_text(
+            json.dumps([["val-a", 0, 2, 1]])
+        )
+
+    sys.path.insert(0, str(ROOT / "scripts"))
+    try:
+        from build_splatt3r_scannetpp_manifest import build_manifest
+    finally:
+        sys.path.pop(0)
+    manifest = build_manifest(
+        scene_root=tmp_path,
+        split_root=split_root,
+        coverage_root=coverage_root,
+        test_assets=assets,
+        image_directory="resized_undistorted_images",
+        evaluation_stride=1,
+    )
+    assert manifest["train"] == ["train-a"]
+    assert [entry["bin"] for entry in manifest["val"]] == [
+        "close",
+        "medium",
+        "wide",
+        "very_wide",
+    ]
+    assert manifest["stats"]["evaluation_episodes"] == 4

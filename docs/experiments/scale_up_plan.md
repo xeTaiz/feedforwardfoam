@@ -1,7 +1,7 @@
 # ScanNet++ longer-training plan and execution state
 
-Status: **running** — arm A scale-up training launched on `KW60995`.
-Worker/data setup and the scene-disjoint episode manifest are complete.
+Status: **preparing a Splatt3R-comparable rerun**. The earlier 80x80 arm A run
+terminated without `final.pt`; its step-1,000 metrics remain diagnostic only.
 
 ## Current execution state (2026-08-19)
 
@@ -46,9 +46,11 @@ automatically from `runs/scannetpp_scaleup_arm_a_seed17/latest.pt` when present.
 ## Observed run state
 
 Job `d48642b1-23a4-4a17-947c-dbd022685dc0` (`wh_fffoam-scaleup-a3`) started at
-17:18 on repo commit `07e3b25` and reached step 1,000 at 17:35, so about one
-step per second and roughly 14 hours for 50,000 steps. `active_cells` stays at
-12,800 for every logged step, confirming arm A keeps both full proposal sets.
+17:18 on repo commit `07e3b25`, reached step 1,000 at 17:35, and later failed
+without writing `final.pt`. It therefore did not complete the planned 50,000
+steps and is not resumable from a verified terminal state.
+During the observed checkpoints, `active_cells` stayed at 12,800, confirming
+that arm A retained both 80x80 proposal lattices.
 
 First scene-disjoint validation (step 1,000, 18 episodes, untrained-scene
 targets):
@@ -80,8 +82,8 @@ not justify delaying the scene-disjoint run.
 | Worker | GPUs | Notes |
 |---|---|---|
 | `KW60996` | 4× RTX A6000 48 GB | idle after the fixed-triplet jobs; holds the only accessible checkpoint copy, but advertises no transferable data paths |
-| `KW60995` | 6× RTX A6000 48 GB | selected scale-up worker; full dataset mounted and environment bootstrapped |
-| `KW60898` | 1× RTX 6000 Ada 48 GB | shared multi-tenant box; older partial ScanNet++ paths |
+| `KW60995` | 3× RTX A6000 48 GB | full dataset mounted; previous run environment remains |
+| `KW60898` | 1× RTX 6000 Ada 48 GB | shared multi-tenant box; full dataset is reachable through the IBEX mount |
 | `gpu210-02` | 1× Tesla V100 32 GB | **no data paths bound** |
 | `KW61627` | 2× RTX PRO 6000 Blackwell 96 GB | busy with unrelated DRRT work |
 | `KW61633` | 1× RTX A2000 12 GB | too small |
@@ -146,3 +148,49 @@ quantiles; they are not used by this manifest.
   be taken from published pixel-aligned Gaussian tables (pixelSplat, MVSplat)
   rather than a matched in-house run for now. A matched run is still required
   before any fairness claim is published.
+
+## 8. Splatt3R-comparable protocol
+
+The next run uses
+`configs/experiments/scannetpp_splatt3r_256_arm_a.yaml`:
+
+- 256x256 inputs, two contexts, and four independently sampled targets per
+  optimizer step;
+- effective scene batch 12 through gradient accumulation because the trainer
+  remains single-process;
+- masked MSE plus LPIPS 0.25, matching Splatt3R's published objective;
+- exact official ScanNet++ train/validation splits and the four published
+  close/medium/wide/very-wide evaluation tuple files;
+- exhaustive fixed evaluation with full-frame and laser-supported PSNR, SSIM,
+  and LPIPS reported per overlap bin;
+- arm A's full two-view proposal concatenation. At 256x256 this is 131,072
+  active Foam cells, not the earlier 12,800-cell 80x80 setting.
+
+`scripts/build_splatt3r_scannetpp_manifest.py` constructs the training split and
+maps the published integer tuple indices onto ScanNet++ frame names.
+`python -m feedforwardfoam.train --evaluate-checkpoint ...` runs the exhaustive
+fixed evaluation independently of training.
+
+### Required preprocessing
+
+The mounted ScanNet++ tree does not contain laser depth PNGs. Splatt3R renders
+them from each scene's `scans/mesh_aligned_0.05.ply`; silently substituting VGGT
+depth would invalidate the matched mask protocol. Before the run,
+`scripts/render_scannetpp_depths.py` must render resumable uint16 millimeter
+depths beside `resized_undistorted_images`:
+
+```bash
+python scripts/render_scannetpp_depths.py \
+  --data-root /data_ibex_c2324/data/scannetpp/data \
+  --scene-list /data_ibex_c2324/data/scannetpp/splits/nvs_sem_train.txt
+python scripts/render_scannetpp_depths.py \
+  --data-root /data_ibex_c2324/data/scannetpp/data \
+  --scene-list /data_ibex_c2324/data/scannetpp/splits/nvs_sem_val.txt
+```
+
+The renderer uses Nerfstudio OpenGL camera-to-world poses directly, scales
+intrinsics to the resized image dimensions, applies the published anonymous
+pixel mask convention, rejects empty renders, writes atomically, and skips
+completed files on restart. A synthetic EGL smoke rendered a plane at 2.0 m to
+an exact 2,000 mm uint16 depth and verified that `ScanNetPPDataset` loads it as
+2.0 m.

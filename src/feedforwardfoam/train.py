@@ -21,6 +21,7 @@ from .data.scannetpp import ScanNetPPDataset
 from .fusion import (
     align_depths_to_calibrated_cameras,
     build_canonical_support,
+    laser_context_support_mask,
     projected_context_support_mask,
     world_points_from_z_depth,
 )
@@ -34,6 +35,7 @@ from .head import (
     uniform_selection_indices,
     voxel_budget_indices,
 )
+from .metrics import SpatialLPIPS, masked_lpips, masked_ssim, new_lpips
 from .renderer import (
     PowerFoamRendererBridge,
     camera_from_view,
@@ -105,26 +107,33 @@ def _build_datasets(config: dict[str, Any], data_root: Path):
             )
             return train_dataset, None
         manifest = Path(data_cfg["scene_manifest"])
+        target_pool = data_cfg.get("target_pool_size", 32)
+        common: dict[str, Any] = {
+            "data_root": data_root,
+            "scene_manifest": manifest,
+            "context_views": context_views,
+            "image_resolution": resolution,
+            "target_pool_size": int(target_pool) if target_pool is not None else None,
+            "reserve_support_view": bool(data_cfg.get("reserve_support_view", False)),
+            "native_image_directory": str(
+                data_cfg.get("native_image_directory", "resized_undistorted_images")
+            ),
+            "resize_mode": str(data_cfg.get("resize_mode", "area")),
+            "load_depth": bool(data_cfg.get("load_depth", False)),
+        }
         train_dataset = MultiSceneScanNetPP(
-            data_root,
-            manifest,
+            **common,
             split="train",
-            context_views=context_views,
             target_views=target_views,
-            image_resolution=resolution,
-            target_pool_size=int(data_cfg.get("target_pool_size", 32)),
-            reserve_support_view=bool(data_cfg.get("reserve_support_view", False)),
+            coverage_root=data_cfg.get("coverage_root"),
+            context_overlap_threshold=float(data_cfg.get("context_overlap_threshold", 0.5)),
+            target_overlap_threshold=float(data_cfg.get("target_overlap_threshold", 0.6)),
             seed=int(config["seed"]),
         )
         val_dataset = MultiSceneScanNetPP(
-            data_root,
-            manifest,
+            **common,
             split="val",
-            context_views=context_views,
-            target_views=target_views,
-            image_resolution=resolution,
-            target_pool_size=int(data_cfg.get("target_pool_size", 32)),
-            reserve_support_view=bool(data_cfg.get("reserve_support_view", False)),
+            target_views=int(data_cfg.get("validation_target_views", target_views)),
             seed=int(config["seed"]) + 10_000,
         )
         return train_dataset, val_dataset
@@ -235,30 +244,46 @@ def _episode_objective(
     alpha_weight: float,
     device: torch.device,
     masks=None,
+    lpips_weight: float = 0.0,
+    lpips_model: SpatialLPIPS | None = None,
+    splatt3r_masked_reduction: bool = False,
 ):
     rgb_losses = []
+    perceptual_losses = []
     alpha_losses = []
     for index, (output, target_view) in enumerate(zip(outputs, target_views, strict=True)):
         target = target_view.image.to(device)
-        if masks is None:
+        mask = masks[index].to(device) if masks is not None else None
+        if mask is None:
             rgb_losses.append(_rgb_loss(output.rgb, target, rgb_loss_name))
+        elif mask.any():
+            rgb_loss = _rgb_loss(output.rgb[mask], target[mask], rgb_loss_name)
+            if splatt3r_masked_reduction:
+                if rgb_loss_name != "mse":
+                    raise ValueError("Splatt3R masked reduction is defined only for MSE")
+                rgb_loss = 3.0 * rgb_loss
+            rgb_losses.append(rgb_loss)
         else:
-            mask = masks[index].to(device)
-            if mask.any():
-                rgb_losses.append(_rgb_loss(output.rgb[mask], target[mask], rgb_loss_name))
-            else:
-                # Predicted context geometry can occasionally have no projected
-                # support. Fall back to full RGB rather than dropping the step.
-                rgb_losses.append(_rgb_loss(output.rgb, target, rgb_loss_name))
+            raise ValueError("Masked benchmark supervision cannot use an empty support mask")
+        if lpips_weight > 0:
+            if lpips_model is None:
+                raise ValueError("lpips_weight requires an LPIPS model")
+            perceptual_losses.append(masked_lpips(lpips_model, output.rgb, target, mask))
         if alpha_weight > 0:
             if target_view.alpha is None:
                 raise ValueError("alpha_loss_weight requires target alpha")
             alpha_losses.append(F.l1_loss(output.alpha, target_view.alpha.to(device)))
     rgb_loss = torch.stack(rgb_losses).mean()
+    perceptual_loss = (
+        torch.stack(perceptual_losses).mean()
+        if perceptual_losses
+        else torch.zeros((), device=device)
+    )
     alpha_loss = (
         torch.stack(alpha_losses).mean() if alpha_losses else torch.zeros((), device=device)
     )
-    return rgb_loss + alpha_weight * alpha_loss, rgb_loss, alpha_loss
+    loss = rgb_loss + lpips_weight * perceptual_loss + alpha_weight * alpha_loss
+    return loss, rgb_loss, perceptual_loss, alpha_loss
 
 
 def _reorder_context_features(
@@ -441,6 +466,9 @@ def _validation(
     support_dilation: int,
     output_dir: Path | None = None,
     step: int | None = None,
+    support_mask_source: str = "predicted",
+    lpips_model: SpatialLPIPS | None = None,
+    benchmark_metrics: bool = False,
 ) -> dict[str, float]:
     groups: dict[str, dict[str, list[float]]] = {}
 
@@ -454,6 +482,10 @@ def _validation(
                 "alpha": [],
                 "coverage": [],
                 "gauge_hit": [],
+                "ssim": [],
+                "lpips": [],
+                "support_ssim": [],
+                "support_lpips": [],
             },
         )
 
@@ -464,16 +496,24 @@ def _validation(
             mask_contexts = (
                 episode.context[:1] if support_context_mode == "canonical" else episode.context
             )
-            support_masks = [
-                projected_context_support_mask(
-                    mask_contexts,
-                    features["depth"][:, : len(mask_contexts)],
-                    target,
-                    device,
-                    dilation=support_dilation,
-                )
-                for target in episode.target
-            ]
+            if support_mask_source == "laser":
+                support_masks = [
+                    laser_context_support_mask(mask_contexts, target, device)
+                    for target in episode.target
+                ]
+            elif support_mask_source == "predicted":
+                support_masks = [
+                    projected_context_support_mask(
+                        mask_contexts,
+                        features["depth"][:, : len(mask_contexts)],
+                        target,
+                        device,
+                        dilation=support_dilation,
+                    )
+                    for target in episode.target
+                ]
+            else:
+                raise ValueError("support_mask_source must be 'predicted' or 'laser'")
             label = str(label)
             buckets = (group("all"),) if label == "all" else (group("all"), group(label))
             for output, target_view, support_mask in zip(
@@ -486,6 +526,26 @@ def _validation(
                     if support_mask.any()
                     else None
                 )
+                if benchmark_metrics:
+                    if lpips_model is None:
+                        raise ValueError("benchmark_metrics require an LPIPS model")
+                    ssim = masked_ssim(output.rgb, target)
+                    lpips_value = float(masked_lpips(lpips_model, output.rgb, target))
+                    support_ssim = (
+                        masked_ssim(output.rgb, target, support_mask)
+                        if support_mask.any()
+                        else None
+                    )
+                    support_lpips = (
+                        float(masked_lpips(lpips_model, output.rgb, target, support_mask))
+                        if support_mask.any()
+                        else None
+                    )
+                else:
+                    ssim = None
+                    lpips_value = None
+                    support_ssim = None
+                    support_lpips = None
                 alpha_mask = output.alpha > 0.01
                 for bucket in buckets:
                     bucket["mse"].append(mse)
@@ -494,6 +554,12 @@ def _validation(
                     bucket["coverage"].append(float(alpha_mask.float().mean()))
                     if support_mse is not None:
                         bucket["support_mse"].append(support_mse)
+                    if ssim is not None and lpips_value is not None:
+                        bucket["ssim"].append(ssim)
+                        bucket["lpips"].append(lpips_value)
+                    if support_ssim is not None and support_lpips is not None:
+                        bucket["support_ssim"].append(support_ssim)
+                        bucket["support_lpips"].append(support_lpips)
             gauge_hit = float(features["depth_alignment_bound_hit"].mean())
             for bucket in buckets:
                 bucket["gauge_hit"].append(gauge_hit)
@@ -529,8 +595,150 @@ def _validation(
             result[f"val_support_psnr{suffix}"] = (
                 -10.0 * torch.log10(torch.tensor(support_mse + 1e-10)).item()
             )
+            splatt3r_mse = 3.0 * support_mse
+            result[f"val_splatt3r_masked_mse{suffix}"] = splatt3r_mse
+            result[f"val_splatt3r_masked_psnr{suffix}"] = (
+                -10.0 * torch.log10(torch.tensor(splatt3r_mse + 1e-10)).item()
+            )
+        if values["ssim"]:
+            result[f"val_ssim{suffix}"] = sum(values["ssim"]) / len(values["ssim"])
+            result[f"val_lpips{suffix}"] = sum(values["lpips"]) / len(values["lpips"])
+        if values["support_ssim"]:
+            result[f"val_support_ssim{suffix}"] = sum(values["support_ssim"]) / len(
+                values["support_ssim"]
+            )
+            result[f"val_support_lpips{suffix}"] = sum(values["support_lpips"]) / len(
+                values["support_lpips"]
+            )
+            result[f"val_splatt3r_masked_ssim{suffix}"] = 3.0 * result[f"val_support_ssim{suffix}"]
     result["val_renders"] = float(len(groups["all"]["mse"]))
     return result
+
+
+def _training_episode(
+    *,
+    head,
+    backbone,
+    bridge,
+    episode: NvsEpisode,
+    representation: str,
+    device: torch.device,
+    train_cfg: dict[str, Any],
+    lpips_model: SpatialLPIPS | None,
+    loss_scale: float,
+):
+    params, features = _predict(head, backbone, episode, representation, device)
+    target_views = (
+        episode.context if bool(train_cfg.get("target_from_context", False)) else episode.target
+    )
+    outputs = _render_targets(params, target_views, bridge, representation, device)
+    use_mask = bool(train_cfg.get("visibility_mask", False))
+    report_support = bool(train_cfg.get("report_support_metrics", False)) or use_mask
+    support_context_mode = str(train_cfg.get("support_mask_contexts", "all"))
+    if support_context_mode not in {"all", "canonical"}:
+        raise ValueError("support_mask_contexts must be 'all' or 'canonical'")
+    support_mask_source = str(train_cfg.get("support_mask_source", "predicted"))
+    mask_contexts = episode.context[:1] if support_context_mode == "canonical" else episode.context
+    if report_support:
+        if support_mask_source == "laser":
+            support_masks = [
+                laser_context_support_mask(mask_contexts, target, device) for target in target_views
+            ]
+        elif support_mask_source == "predicted":
+            support_masks = [
+                projected_context_support_mask(
+                    mask_contexts,
+                    features["depth"][:, : len(mask_contexts)],
+                    target,
+                    device,
+                    dilation=int(train_cfg.get("visibility_mask_dilation", 2)),
+                )
+                for target in target_views
+            ]
+        else:
+            raise ValueError("support_mask_source must be 'predicted' or 'laser'")
+    else:
+        support_masks = None
+    masks = support_masks if use_mask else None
+    loss, rgb_loss, perceptual_loss, alpha_loss = _episode_objective(
+        outputs,
+        target_views,
+        rgb_loss_name=str(train_cfg.get("rgb_loss", "charbonnier")),
+        alpha_weight=float(train_cfg.get("alpha_loss_weight", 0.0)),
+        device=device,
+        masks=masks,
+        lpips_weight=float(train_cfg.get("lpips_loss_weight", 0.0)),
+        lpips_model=lpips_model,
+        splatt3r_masked_reduction=bool(train_cfg.get("splatt3r_masked_rgb_reduction", False)),
+    )
+    (loss * loss_scale).backward()
+
+    per_target = [
+        _metrics(output.rgb.detach(), view.image.to(device))
+        for output, view in zip(outputs, target_views, strict=True)
+    ]
+    support_per_target = (
+        [
+            _metrics(output.rgb.detach(), view.image.to(device), mask)
+            for output, view, mask in zip(outputs, target_views, support_masks, strict=True)
+        ]
+        if support_masks is not None and all(mask.any() for mask in support_masks)
+        else None
+    )
+    stats = {
+        "loss": float(loss.detach()),
+        "rgb_loss": float(rgb_loss.detach()),
+        "lpips_loss": float(perceptual_loss.detach()),
+        "alpha_loss": float(alpha_loss.detach()),
+        "target_views": float(len(target_views)),
+        "train_psnr": sum(metric["psnr"] for metric in per_target) / len(per_target),
+        "train_mse": sum(metric["mse"] for metric in per_target) / len(per_target),
+        "render_alpha_mean": sum(float(output.alpha.detach().mean()) for output in outputs)
+        / len(outputs),
+        "active_cells": float(
+            params.points.shape[0] if representation == "foam" else params.means.shape[0]
+        ),
+        "mean_radius": float(
+            F.softplus(params.radii.detach(), beta=100).mean()
+            if representation == "foam"
+            else params.scales.detach().mean()
+        ),
+        "depth_alignment_scale": float(features["depth_alignment_scale"].mean()),
+        "depth_alignment_raw_scale": float(features["depth_alignment_raw_scale"].mean()),
+        "depth_alignment_bound_hit": float(features["depth_alignment_bound_hit"].mean()),
+        "canonical_support_fraction": float(features["canonical_support_fraction"].mean()),
+        "visibility_mask_fraction": float(
+            torch.stack([mask.float().mean() for mask in support_masks]).mean()
+            if support_masks is not None
+            else 1.0
+        ),
+    }
+    if support_per_target is not None:
+        alpha_threshold = float(train_cfg.get("coverage_alpha_threshold", 0.01))
+        alpha_masks = [output.alpha.detach() > alpha_threshold for output in outputs]
+        intersections = [
+            (alpha_mask & support_mask).float().mean()
+            for alpha_mask, support_mask in zip(alpha_masks, support_masks, strict=True)
+        ]
+        unions = [
+            (alpha_mask | support_mask).float().mean()
+            for alpha_mask, support_mask in zip(alpha_masks, support_masks, strict=True)
+        ]
+        stats.update(
+            {
+                "support_mse": sum(metric["mse"] for metric in support_per_target)
+                / len(support_per_target),
+                "support_psnr": sum(metric["psnr"] for metric in support_per_target)
+                / len(support_per_target),
+                "render_coverage_fraction": sum(
+                    float(alpha_mask.float().mean()) for alpha_mask in alpha_masks
+                )
+                / len(alpha_masks),
+                "support_render_iou": float(torch.stack(intersections).mean())
+                / float(torch.stack(unions).mean().clamp_min(1e-8)),
+            }
+        )
+    return stats, outputs
 
 
 def _checkpoint_state(
@@ -645,12 +853,15 @@ def train(
             T_max=int(config["train"]["steps"]),
             eta_min=float(config["train"].get("min_learning_rate", 1e-6)),
         )
+    elif schedule_name == "half_decay":
+        scheduler = torch.optim.lr_scheduler.MultiStepLR(
+            optimizer, milestones=[int(config["train"]["steps"]) // 2], gamma=0.1
+        )
     else:
-        raise ValueError("learning_rate_schedule must be 'constant' or 'cosine'")
+        raise ValueError("learning_rate_schedule must be 'constant', 'cosine', or 'half_decay'")
     output_dir = Path(config["output_dir"])
     output_dir.mkdir(parents=True, exist_ok=True)
     (output_dir / "config.yaml").write_text(yaml.safe_dump(config, sort_keys=True))
-
     configured_episode = _configured_fixed_episode(train_dataset, config)
     initial_episode = configured_episode or _sample_episode(train_dataset, 0, True, None)
     geometry = _triplet_geometry(initial_episode)
@@ -705,6 +916,14 @@ def train(
             train_dataset.generator.set_state(state["dataset_generator"])
 
     train_cfg = config["train"]
+    scene_batch_size = int(train_cfg.get("scene_batch_size", 1))
+    if scene_batch_size <= 0:
+        raise ValueError("scene_batch_size must be positive")
+    support_context_mode = str(train_cfg.get("support_mask_contexts", "all"))
+    support_mask_source = str(train_cfg.get("support_mask_source", "predicted"))
+    benchmark_metrics = bool(train_cfg.get("report_benchmark_metrics", False))
+    needs_lpips = float(train_cfg.get("lpips_loss_weight", 0.0)) > 0 or benchmark_metrics
+    lpips_model = new_lpips(device) if needs_lpips else None
     fixed_episode = initial_episode
     resample = bool(train_cfg.get("resample_episodes", True))
     if configured_episode is not None and resample:
@@ -727,117 +946,49 @@ def train(
         default=float("-inf"),
     )
     for step in range(start_step, int(train_cfg["steps"]) + 1):
-        episode = _sample_episode(train_dataset, step, resample, fixed_episode)
-        params, features = _predict(head, backbone, episode, representation, device)
-        target_views = (
-            episode.context if bool(train_cfg.get("target_from_context", False)) else episode.target
-        )
-        outputs = _render_targets(params, target_views, bridge, representation, device)
-        use_mask = bool(train_cfg.get("visibility_mask", False))
-        report_support = bool(train_cfg.get("report_support_metrics", False)) or use_mask
-        support_context_mode = str(train_cfg.get("support_mask_contexts", "all"))
-        if support_context_mode not in {"all", "canonical"}:
-            raise ValueError("support_mask_contexts must be 'all' or 'canonical'")
-        mask_contexts = (
-            episode.context[:1] if support_context_mode == "canonical" else episode.context
-        )
-        support_masks = (
-            [
-                projected_context_support_mask(
-                    mask_contexts,
-                    features["depth"][:, : len(mask_contexts)],
-                    target,
-                    device,
-                    dilation=int(train_cfg.get("visibility_mask_dilation", 2)),
-                )
-                for target in target_views
-            ]
-            if report_support
-            else None
-        )
-        masks = support_masks if use_mask else None
-        loss, rgb_loss, alpha_loss = _episode_objective(
-            outputs,
-            target_views,
-            rgb_loss_name=str(train_cfg.get("rgb_loss", "charbonnier")),
-            alpha_weight=float(train_cfg.get("alpha_loss_weight", 0.0)),
-            device=device,
-            masks=masks,
-        )
         optimizer.zero_grad(set_to_none=True)
-        loss.backward()
-        grad_norm = torch.nn.utils.clip_grad_norm_(head.parameters(), 1.0, error_if_nonfinite=True)
+        batch_stats: list[dict[str, float]] = []
+        outputs = None
+        episode = None
+        for batch_index in range(scene_batch_size):
+            sample_index = (step - 1) * scene_batch_size + batch_index
+            episode = _sample_episode(train_dataset, sample_index, resample, fixed_episode)
+            episode_stats, outputs = _training_episode(
+                head=head,
+                backbone=backbone,
+                bridge=bridge,
+                episode=episode,
+                representation=representation,
+                device=device,
+                train_cfg=train_cfg,
+                lpips_model=lpips_model,
+                loss_scale=1.0 / scene_batch_size,
+            )
+            batch_stats.append(episode_stats)
+        grad_norm = torch.nn.utils.clip_grad_norm_(
+            head.parameters(),
+            float(train_cfg.get("gradient_clip_norm", 1.0)),
+            error_if_nonfinite=True,
+        )
         optimizer.step()
         if scheduler is not None:
             scheduler.step()
 
-        per_target = [
-            _metrics(output.rgb.detach(), view.image.to(device))
-            for output, view in zip(outputs, target_views, strict=True)
-        ]
-        support_per_target = (
-            [
-                _metrics(output.rgb.detach(), view.image.to(device), mask)
-                for output, view, mask in zip(outputs, target_views, support_masks, strict=True)
-            ]
-            if support_masks is not None and all(mask.any() for mask in support_masks)
-            else None
-        )
+        metric_names = set().union(*(stats.keys() for stats in batch_stats))
         record = {
-            "step": float(step),
-            "loss": float(loss.detach()),
-            "rgb_loss": float(rgb_loss.detach()),
-            "alpha_loss": float(alpha_loss.detach()),
-            "grad_norm": float(grad_norm),
-            "learning_rate": float(optimizer.param_groups[0]["lr"]),
-            "target_views": float(len(target_views)),
-            "train_psnr": sum(metric["psnr"] for metric in per_target) / len(per_target),
-            "train_mse": sum(metric["mse"] for metric in per_target) / len(per_target),
-            "render_alpha_mean": sum(float(output.alpha.detach().mean()) for output in outputs)
-            / len(outputs),
-            "active_cells": float(
-                params.points.shape[0] if representation == "foam" else params.means.shape[0]
-            ),
-            "mean_radius": float(
-                F.softplus(params.radii.detach(), beta=100).mean()
-                if representation == "foam"
-                else params.scales.detach().mean()
-            ),
-            "depth_alignment_scale": float(features["depth_alignment_scale"].mean()),
-            "depth_alignment_raw_scale": float(features["depth_alignment_raw_scale"].mean()),
-            "depth_alignment_bound_hit": float(features["depth_alignment_bound_hit"].mean()),
-            "canonical_support_fraction": float(features["canonical_support_fraction"].mean()),
-            "visibility_mask_fraction": float(
-                torch.stack([mask.float().mean() for mask in support_masks]).mean()
-                if support_masks is not None
-                else 1.0
-            ),
+            name: sum(stats[name] for stats in batch_stats if name in stats)
+            / sum(name in stats for stats in batch_stats)
+            for name in metric_names
         }
-        if support_per_target is not None:
-            alpha_threshold = float(train_cfg.get("coverage_alpha_threshold", 0.01))
-            alpha_masks = [output.alpha.detach() > alpha_threshold for output in outputs]
-            intersections = [
-                (alpha_mask & support_mask).float().mean()
-                for alpha_mask, support_mask in zip(alpha_masks, support_masks, strict=True)
-            ]
-            unions = [
-                (alpha_mask | support_mask).float().mean()
-                for alpha_mask, support_mask in zip(alpha_masks, support_masks, strict=True)
-            ]
-            record.update(
-                {
-                    "support_mse": sum(metric["mse"] for metric in support_per_target)
-                    / len(support_per_target),
-                    "support_psnr": sum(metric["psnr"] for metric in support_per_target)
-                    / len(support_per_target),
-                    "render_coverage_fraction": sum(
-                        float(alpha_mask.float().mean()) for alpha_mask in alpha_masks
-                    )
-                    / len(alpha_masks),
-                    "support_render_iou": float(torch.stack(intersections).mean())
-                    / float(torch.stack(unions).mean().clamp_min(1e-8)),
-                }
-            )
+        record.update(
+            {
+                "step": float(step),
+                "grad_norm": float(grad_norm),
+                "learning_rate": float(optimizer.param_groups[0]["lr"]),
+                "scene_batch_size": float(scene_batch_size),
+                "supervised_target_views": sum(stats["target_views"] for stats in batch_stats),
+            }
+        )
         if val_records and step % int(train_cfg["validate_every"]) == 0:
             record.update(
                 _validation(
@@ -849,6 +1000,9 @@ def train(
                     device=device,
                     support_context_mode=support_context_mode,
                     support_dilation=int(train_cfg.get("visibility_mask_dilation", 2)),
+                    support_mask_source=support_mask_source,
+                    lpips_model=lpips_model,
+                    benchmark_metrics=benchmark_metrics,
                     output_dir=(
                         output_dir
                         if bool(train_cfg.get("validation_render_bundles", False))
@@ -877,6 +1031,8 @@ def train(
             diagnostic_every > 0
             and step % diagnostic_every == 0
             and not bool(train_cfg.get("target_from_context", False))
+            and episode is not None
+            and outputs is not None
         ):
             _save_diagnostic_images(output_dir, step, episode, outputs)
         if step % int(train_cfg["log_every"]) == 0:
@@ -897,23 +1053,129 @@ def train(
     (output_dir / "metrics.json").write_text(json.dumps(history, indent=2))
 
 
+def evaluate(
+    config: dict[str, Any],
+    data_root: Path,
+    backbone_checkpoint: Path | None,
+    model_checkpoint: Path,
+    use_stub: bool,
+    representation: str,
+    output: Path,
+) -> None:
+    """Evaluate one trained head on every fixed manifest episode."""
+    if not torch.cuda.is_available():
+        raise RuntimeError("Evaluation requires CUDA because Power Foam uses Warp kernels")
+    device = torch.device("cuda")
+    data_cfg = config["data"]
+    if str(data_cfg.get("dataset")) != "scannetpp":
+        raise ValueError("Fixed benchmark evaluation currently requires ScanNet++")
+    resolution = int(config["backbone"]["image_resolution"])
+    target_pool = data_cfg.get("target_pool_size", 32)
+    validation = MultiSceneScanNetPP(
+        data_root,
+        Path(data_cfg["scene_manifest"]),
+        split="val",
+        context_views=int(data_cfg["context_views"]),
+        target_views=int(data_cfg.get("validation_target_views", data_cfg["target_views"])),
+        image_resolution=resolution,
+        target_pool_size=int(target_pool) if target_pool is not None else None,
+        reserve_support_view=bool(data_cfg.get("reserve_support_view", False)),
+        native_image_directory=str(
+            data_cfg.get("native_image_directory", "resized_undistorted_images")
+        ),
+        resize_mode=str(data_cfg.get("resize_mode", "area")),
+        load_depth=bool(data_cfg.get("load_depth", False)),
+        seed=int(config["seed"]) + 10_000,
+    )
+    if validation.episode_entries is None:
+        raise ValueError("Benchmark evaluation requires explicit fixed validation episodes")
+    if use_stub:
+        backbone = FrozenGeometryStub().to(device)
+    else:
+        if backbone_checkpoint is None:
+            raise ValueError("VGGT-Ω checkpoint is required")
+        backbone = FrozenVGGTOmega(backbone_checkpoint).to(device)
+    backbone.eval()
+    head = build_head(config, backbone.register_dim, representation, device)
+    state = torch.load(model_checkpoint, map_location=device, weights_only=False)
+    head.load_state_dict(state["head"])
+    head.eval()
+    records = validation.all_episode_records()
+    initial_episode = records[0][1]
+    head_cfg = config["head"]
+    if representation == "foam":
+        bridge = PowerFoamRendererBridge(
+            powerfoam_args(
+                num_texel_sites=int(head_cfg["num_texel_sites"]),
+                sv_dof=int(head_cfg["spherical_voronoi_dof"]),
+                bkgd_color=tuple(config["renderer"]["bkgd_color"]),
+                is_pinhole=bool(config["renderer"]["is_pinhole"]),
+            ),
+            camera_from_view(initial_episode.context[0], device),
+        )
+    else:
+        baseline = config["baseline"]
+        bridge = GaussianRendererBridge(
+            bkgd_color=tuple(baseline["bkgd_color"]),
+            eps2d=float(baseline["eps2d"]),
+            radius_clip=float(baseline["radius_clip"]),
+            tile_size=int(baseline["tile_size"]),
+            rasterize_mode=str(baseline["rasterize_mode"]),
+        )
+    train_cfg = config["train"]
+    metrics = _validation(
+        records,
+        head=head,
+        backbone=backbone,
+        bridge=bridge,
+        representation=representation,
+        device=device,
+        support_context_mode=str(train_cfg.get("support_mask_contexts", "all")),
+        support_dilation=int(train_cfg.get("visibility_mask_dilation", 2)),
+        support_mask_source=str(train_cfg.get("support_mask_source", "predicted")),
+        lpips_model=new_lpips(device),
+        benchmark_metrics=True,
+    )
+    if int(metrics["val_renders"]) != len(validation.episode_entries):
+        raise RuntimeError(
+            "Exhaustive evaluation did not render every manifest episode exactly once"
+        )
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(json.dumps(metrics, indent=2) + "\n")
+    print(json.dumps(metrics, sort_keys=True), flush=True)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--data-root", type=Path, required=True)
     parser.add_argument("--checkpoint", type=Path)
     parser.add_argument("--resume", type=Path)
+    parser.add_argument("--evaluate-checkpoint", type=Path)
+    parser.add_argument("--evaluation-output", type=Path, default=Path("evaluation.json"))
     parser.add_argument("--use-stub-backbone", action="store_true")
     parser.add_argument("--representation", choices=("foam", "gaussian"), default="foam")
     cli = parser.parse_args()
-    train(
-        _load_config(cli.config),
-        cli.data_root,
-        cli.checkpoint,
-        cli.use_stub_backbone,
-        cli.representation,
-        cli.resume,
-    )
+    config = _load_config(cli.config)
+    if cli.evaluate_checkpoint is not None:
+        evaluate(
+            config,
+            cli.data_root,
+            cli.checkpoint,
+            cli.evaluate_checkpoint,
+            cli.use_stub_backbone,
+            cli.representation,
+            cli.evaluation_output,
+        )
+    else:
+        train(
+            config,
+            cli.data_root,
+            cli.checkpoint,
+            cli.use_stub_backbone,
+            cli.representation,
+            cli.resume,
+        )
 
 
 if __name__ == "__main__":

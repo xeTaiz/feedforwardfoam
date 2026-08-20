@@ -50,7 +50,7 @@ def test_multiview_objective_averages_all_target_views():
         SimpleNamespace(rgb=torch.full((2, 2, 3), 0.7), alpha=torch.ones(2, 2)),
         SimpleNamespace(rgb=torch.full((2, 2, 3), 0.3), alpha=torch.ones(2, 2)),
     )
-    loss, rgb_loss, alpha_loss = _episode_objective(
+    loss, rgb_loss, lpips_loss, alpha_loss = _episode_objective(
         predictions,
         targets,
         rgb_loss_name="mse",
@@ -60,7 +60,25 @@ def test_multiview_objective_averages_all_target_views():
     expected = torch.tensor((0.1**2 + 0.1**2 + 0.3**2 + 0.05**2) / 4)
     assert torch.allclose(rgb_loss, expected)
     assert torch.allclose(loss, expected)
+    assert lpips_loss == 0
     assert alpha_loss == 0
+
+
+def test_splatt3r_masked_mse_sums_rgb_channels_per_supported_pixel():
+    target = (_view(0.0),)
+    prediction = (SimpleNamespace(rgb=torch.ones(2, 2, 3), alpha=torch.ones(2, 2)),)
+    mask = [torch.tensor([[True, False], [False, False]])]
+    loss, rgb_loss, _, _ = _episode_objective(
+        prediction,
+        target,
+        rgb_loss_name="mse",
+        alpha_weight=0.0,
+        device=torch.device("cpu"),
+        masks=mask,
+        splatt3r_masked_reduction=True,
+    )
+    assert rgb_loss == 3.0
+    assert loss == 3.0
 
 
 class _StubBackboneWithCameras(torch.nn.Module):

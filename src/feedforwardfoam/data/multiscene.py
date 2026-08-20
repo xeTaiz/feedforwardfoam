@@ -34,6 +34,12 @@ class MultiSceneScanNetPP:
         target_pool_size: int | None,
         reserve_support_view: bool,
         seed: int,
+        coverage_root: str | Path | None = None,
+        context_overlap_threshold: float = 0.5,
+        target_overlap_threshold: float = 0.6,
+        native_image_directory: str = "resized_undistorted_images",
+        resize_mode: str = "area",
+        load_depth: bool = False,
     ) -> None:
         self.data_root = Path(data_root)
         manifest_path = Path(scene_manifest)
@@ -52,6 +58,12 @@ class MultiSceneScanNetPP:
         self.target_pool_size = target_pool_size
         self.reserve_support_view = reserve_support_view
         self.seed = seed
+        self.coverage_root = Path(coverage_root) if coverage_root is not None else None
+        self.context_overlap_threshold = context_overlap_threshold
+        self.target_overlap_threshold = target_overlap_threshold
+        self.native_image_directory = native_image_directory
+        self.resize_mode = resize_mode
+        self.load_depth = load_depth
         self.generator = torch.Generator().manual_seed(seed)
         self.episode_entries: list[EpisodeEntry] | None = (
             cast(list[EpisodeEntry], entries) if all(explicit_flags) else None
@@ -77,6 +89,9 @@ class MultiSceneScanNetPP:
             ]
 
     def _new_dataset(self, scene_id: str, seed: int) -> ScanNetPPDataset:
+        overlap_path = (
+            self.coverage_root / f"{scene_id}.json" if self.coverage_root is not None else None
+        )
         return ScanNetPPDataset(
             self.data_root / scene_id,
             split="train",
@@ -85,6 +100,12 @@ class MultiSceneScanNetPP:
             image_resolution=self.image_resolution,
             target_pool_size=self.target_pool_size,
             reserve_support_view=self.reserve_support_view,
+            native_image_directory=self.native_image_directory,
+            resize_mode=self.resize_mode,
+            load_depth=self.load_depth,
+            overlap_path=overlap_path,
+            context_overlap_threshold=self.context_overlap_threshold,
+            target_overlap_threshold=self.target_overlap_threshold,
             seed=seed,
         )
 
@@ -106,6 +127,9 @@ class MultiSceneScanNetPP:
             return self._episode_from_entry(self.episode_entries[index])
         index = int(torch.randint(len(self.datasets), (), generator=self.generator))
         return self.datasets[index].sample_episode()
+
+    def __len__(self) -> int:
+        return len(self.episode_entries) if self.episode_entries is not None else len(self.datasets)
 
     def fixed_episode_records(self, count: int, seed: int) -> tuple[tuple[str, NvsEpisode], ...]:
         """Return deterministic validation episodes, balanced over manifest bins."""
@@ -149,6 +173,14 @@ class MultiSceneScanNetPP:
 
     def fixed_episodes(self, count: int, seed: int) -> tuple[NvsEpisode, ...]:
         return tuple(episode for _, episode in self.fixed_episode_records(count, seed))
+
+    def all_episode_records(self) -> tuple[tuple[str, NvsEpisode], ...]:
+        """Load every explicit manifest episode once, preserving manifest order."""
+        if self.episode_entries is None:
+            raise ValueError("Exhaustive records require explicit manifest episodes")
+        return tuple(
+            (entry["bin"], self._episode_from_entry(entry)) for entry in self.episode_entries
+        )
 
     def state_dict(self) -> dict[str, torch.Tensor | list[torch.Tensor]]:
         state: dict[str, torch.Tensor | list[torch.Tensor]] = {
