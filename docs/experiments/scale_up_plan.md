@@ -1,27 +1,33 @@
 # ScanNet++ longer-training plan and execution state
 
-Status: **preparing a Splatt3R-comparable rerun**. The earlier 80x80 arm A run
-terminated without `final.pt`; its step-1,000 metrics remain diagnostic only.
+Status: **exact Splatt3R-comparable preprocessing is running**. A real one-step
+256x256 Foam training smoke has passed; the resumable long-run launcher will
+start training automatically after laser-depth preprocessing completes.
 
-## Current execution state (2026-08-19)
+## Current execution state (2026-08-20)
 
-- Worker: `KW60995`, 3x RTX A6000 48 GB visible; full ScanNet++ root:
-  `/data_ibex_c2324/data/scannetpp`. GPU 0 runs this job at about 5.1 GB.
-- Published manifest: `data/manifests/scannetpp_scaleup_v1.json`.
-  It contains 5,108 episodes from 852 training scenes and 149 episodes from
-  50 validation scenes, with no scene overlap. Training bins are balanced:
-  1,696 low-angle, 1,712 mid-angle, and 1,700 high-angle episodes. Four official
-  training scenes were skipped: two contain no usable DSLR frames, and two use
-  non-square pixels that this experiment's centered pinhole model rejects.
-  The builder now applies the loader's own camera check and confirms that every
-  selected view file exists, so a manifest cannot fail mid-run as the first
-  launch did.
-- Selected experiment: `configs/experiments/scannetpp_scaleup_arm_a.yaml`;
-  arm A concatenates both 80x80 proposal lattices into one 12,800-cell Foam.
-- The trainer is single-process/single-GPU. It has no DDP implementation; a
-  claimed multi-GPU run would instead be multiple independent models. The
-  primary 50,000-step run therefore uses one GPU and keeps the other devices
-  available.
+- Worker: `KW60995`, 3x RTX A6000 48 GB, full ScanNet++ root at
+  `/data_ibex_c2324/data/scannetpp`.
+- Active Worker Harness job: `8b9f6060-db3c-4b4b-a98f-78dc8e4f2da7`
+  (`wh_fffoam-splatt3r-exact-run-gpu2`), launched from commit `fc3893e`.
+  It renders on GPU 2, then starts the resumable arm A training run on GPU 2.
+  Two unrelated RadFoam jobs occupied GPUs 0 and 1 at launch.
+- Exact manifest: `data/manifests/scannetpp_splatt3r_v1.json`: 227 available
+  training scenes with published Splatt3R coverage and 1,817 fixed evaluation
+  episodes (`347/490/490/490` close/medium/wide/very-wide). The selected train
+  and evaluation episodes span 276 unique scenes.
+- The launcher derives that exact 276-scene set, renders only those scenes, and
+  skips atomically completed depth maps on restart. Its first seven scenes
+  completed successfully (2,842 newly rendered frames) before this update.
+- Real training smoke: 256x256, both context proposal lattices, **131,072 active
+  Foam cells**, four supervised targets, laser support masks, masked MSE, and
+  LPIPS. Step 1 completed with loss `0.13395`, support PSNR `17.56` dB, finite
+  gradient norm `0.6903`, and a loadable 29.1 MB `latest.pt`.
+- Two smoke-discovered protocol bugs are fixed: published explicit evaluation
+  tuples may include frames marked `is_bad`, and LPIPS produces transposed color
+  adjoints that must be made contiguous before Warp's backward bridge.
+- The trainer remains single-process/single-GPU; `scene_batch_size: 12` is
+  sequential gradient accumulation, not DDP.
 - Checkpoint source: the gated `vggt_omega_1b_512.pt` was placed on the shared
   `/data` mount and is copied into the checkout only after its size and MD5
   (`bc5302eada6222303c5e5f8d7dbce709`) match exactly.
@@ -195,16 +201,15 @@ or starts training.
 
 ### Deployment state
 
-No A100 worker is registered. The available dedicated nodes are single 32 GB
-V100s with no advertised transferable data paths; `KW60995` has three idle
-48 GB A6000s and the full dataset mount. Direct inspection found the raw images,
-camera metadata, and meshes there, but no rendered depth directory.
+`KW60995` has three 48 GB A6000s and the full dataset mount. At final launch,
+two other Worker Harness jobs occupied GPUs 0 and 1, so exact preprocessing and
+the subsequent training run were assigned to GPU 2.
 
-No job has been launched yet. Worker Harness `exec` fails immediately on both
-`KW60995` and a V100 even after worker-container restarts, and Pi delegation
-returns HTTP 500 before creating a session. Starting training without the depth
-pass would silently change the requested Splatt3R mask protocol; it is therefore
-intentionally blocked rather than replaced with predicted-depth masks.
+Job `8b9f6060-db3c-4b4b-a98f-78dc8e4f2da7` is running the complete resumable
+launcher. It builds the exact manifest, renders the 276 selected train/evaluation
+scenes, verifies the 4.57 GB VGGT-Ω checkpoint byte-for-byte, and then starts
+`configs/experiments/scannetpp_splatt3r_256_arm_a.yaml`. Re-running the same
+launcher skips completed depths and resumes from `latest.pt`.
 
 The renderer uses Nerfstudio OpenGL camera-to-world poses directly, scales
 intrinsics to the resized image dimensions, applies the published anonymous
