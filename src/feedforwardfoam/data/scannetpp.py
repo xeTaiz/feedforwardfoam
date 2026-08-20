@@ -55,6 +55,7 @@ class ScanNetPPDataset(Dataset[NvsEpisode]):
         native_image_directory: str = "resized_undistorted_images",
         resize_mode: str = "area",
         load_depth: bool = False,
+        include_bad_frames: bool = False,
         overlap_path: str | Path | None = None,
         context_overlap_threshold: float = 0.5,
         target_overlap_threshold: float = 0.6,
@@ -96,7 +97,11 @@ class ScanNetPPDataset(Dataset[NvsEpisode]):
             self.camera = transforms
             validate_native_camera(transforms)
             if split == "train":
-                self.frames = [frame for frame in transforms["frames"] if not frame.get("is_bad")]
+                self.frames = (
+                    transforms["frames"]
+                    if include_bad_frames
+                    else [frame for frame in transforms["frames"] if not frame.get("is_bad")]
+                )
             elif split in {"test", "val"}:
                 self.frames = [
                     frame for frame in transforms.get("test_frames", []) if not frame.get("is_bad")

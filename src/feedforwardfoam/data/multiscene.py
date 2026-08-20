@@ -103,6 +103,7 @@ class MultiSceneScanNetPP:
             native_image_directory=self.native_image_directory,
             resize_mode=self.resize_mode,
             load_depth=self.load_depth,
+            include_bad_frames=self.episode_entries is not None,
             overlap_path=overlap_path,
             context_overlap_threshold=self.context_overlap_threshold,
             target_overlap_threshold=self.target_overlap_threshold,
