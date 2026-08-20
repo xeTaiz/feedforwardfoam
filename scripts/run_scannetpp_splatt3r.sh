@@ -8,11 +8,19 @@ CHECKPOINT=${VGGT_OMEGA_CHECKPOINT:-$ROOT/checkpoints/vggt_omega_1b_512.pt}
 EXPECT_MD5=bc5302eada6222303c5e5f8d7dbce709
 EXPECT_SIZE=4576706117
 MESA=/opt/nvidia/nsight-compute/2024.3.2/host/linux-desktop-glibc_2_11_3-x64/Mesa
+EGL_LIBS=${FFFOAM_EGL_LIBS:-$ROOT/.egl-libs/usr/lib/x86_64-linux-gnu}
+EGL_VENDOR=${FFFOAM_EGL_VENDOR:-$ROOT/.egl-libs/10_nvidia.json}
 
 cd "$ROOT"
 # shellcheck disable=SC1091
 source .venv-powerfoam/bin/activate
-export LD_LIBRARY_PATH="$MESA:${LD_LIBRARY_PATH:-}"
+if [[ ! -d "$EGL_LIBS" || ! -f "$EGL_VENDOR" ]]; then
+  echo "Missing EGL runtime: $EGL_LIBS and $EGL_VENDOR are required" >&2
+  exit 1
+fi
+export LD_LIBRARY_PATH="$EGL_LIBS:/.singularity.d/libs:$MESA:${LD_LIBRARY_PATH:-}"
+export __EGL_VENDOR_LIBRARY_FILENAMES="$EGL_VENDOR"
+export PYOPENGL_PLATFORM=egl
 GPU_IDS=${FFFOAM_RENDER_GPUS:-0,1,2}
 
 python -c 'import huggingface_hub, pyrender, trimesh'
