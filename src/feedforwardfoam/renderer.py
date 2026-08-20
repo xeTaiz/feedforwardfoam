@@ -166,6 +166,6 @@ class PowerFoamRendererBridge:
         return FoamRender(
             rgb=_with_contiguous_backward(result[0]),
             alpha=result[1],
-            normal=_with_contiguous_backward(result[3]),
+            normal=result[3],
             depth=result[4],
         )
