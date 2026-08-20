@@ -31,9 +31,14 @@ def _protocol_frame_names(scene_root: Path, image_directory: str) -> list[str]:
         native_image_directory=image_directory,
         image_resolution=256,
     )
-    return [
-        dataset._frame_name(dataset.frames[index]) for index in dataset._splatt3r_frame_indices()
-    ]
+    ordered_names = json.loads((scene_root / "dslr" / "train_test_lists.json").read_text())["train"]
+    native_frames = {Path(frame["file_path"]).name: frame for frame in dataset.frames}
+    missing = [name for name in ordered_names if Path(name).name not in native_frames]
+    if missing:
+        raise ValueError(f"Native metadata is missing protocol frames: {missing[:3]}")
+    # The published fixed tuple files index the unfiltered train-list order.
+    # Filtering is_bad here makes valid published indices exceed the list.
+    return [dataset._frame_name(native_frames[Path(name).name]) for name in ordered_names]
 
 
 def build_manifest(
