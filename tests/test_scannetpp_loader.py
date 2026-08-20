@@ -153,11 +153,23 @@ def test_multiscene_split_sampling_and_state_roundtrip(tmp_path):
 def test_multiscene_explicit_episodes_preserve_triplets_and_balance_bins(tmp_path):
     for scene_id in ("train-a", "train-b", "val-a", "val-b"):
         _write_native_scene(tmp_path, scene_id)
-    raw_metadata_path = tmp_path / "val-a" / "dslr" / "nerfstudio" / "transforms.json"
+    raw_metadata_path = tmp_path / "val-a" / "dslr" / "nerfstudio" / "transforms_undistorted.json"
     raw_metadata = json.loads(raw_metadata_path.read_text())
     raw_metadata["frames"][0]["is_bad"] = True
     raw_metadata_path.write_text(json.dumps(raw_metadata))
     prefix = "dslr/resized_undistorted_images"
+    filtered = ScanNetPPDataset(
+        tmp_path / "val-a",
+        split="train",
+        context_views=2,
+        target_views=1,
+        image_resolution=8,
+    )
+    with pytest.raises(ValueError, match="frame_000.JPG"):
+        filtered.episode_from_names(
+            [f"{prefix}/frame_000.JPG", f"{prefix}/frame_002.JPG"],
+            [f"{prefix}/frame_001.JPG"],
+        )
 
     def entry(scene_id: str, label: str, offset: int) -> dict:
         return {
