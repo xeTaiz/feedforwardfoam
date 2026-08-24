@@ -77,9 +77,11 @@ def test_geometry_aware_head_uses_pixel_footprint_and_fixed_density():
 
 
 def test_raw_radius_round_trip_and_depth_normals_face_camera():
-    physical = torch.tensor([1e-4, 0.005, 0.05, 1.0])
+    physical = torch.tensor([1e-4, 0.005, 0.05, 1.0], requires_grad=True)
     raw = inverse_softplus(physical)
     assert torch.allclose(torch.nn.functional.softplus(raw, beta=100), physical, atol=1e-6)
+    raw.sum().backward()
+    assert torch.isfinite(physical.grad).all()
 
     ray_directions = torch.zeros(3, 4, 3)
     ray_directions[..., 2] = 1
@@ -148,13 +150,23 @@ def test_zero_residual_head_uses_camera_facing_base_geometry_and_centered_rgb():
 
 def test_decoder_free_initialization_is_independent_of_decoder_weights():
     first = CanonicalPowerFoamHead(
-        register_dim=8, hidden_dim=16, max_cells=12, prediction_mode="initialization",
-        radius_mode="pixel_footprint", density_mode="fixed", fixed_density=100.0,
+        register_dim=8,
+        hidden_dim=16,
+        max_cells=12,
+        prediction_mode="initialization",
+        radius_mode="pixel_footprint",
+        density_mode="fixed",
+        fixed_density=100.0,
         initialize_rgb_from_image=True,
     )
     second = CanonicalPowerFoamHead(
-        register_dim=8, hidden_dim=16, max_cells=12, prediction_mode="initialization",
-        radius_mode="pixel_footprint", density_mode="fixed", fixed_density=100.0,
+        register_dim=8,
+        hidden_dim=16,
+        max_cells=12,
+        prediction_mode="initialization",
+        radius_mode="pixel_footprint",
+        density_mode="fixed",
+        fixed_density=100.0,
         initialize_rgb_from_image=True,
     )
     images = torch.rand(1, 1, 3, 3, 4)
@@ -173,8 +185,13 @@ def test_decoder_free_initialization_is_independent_of_decoder_weights():
 
 def test_absolute_mode_keeps_only_position_initialization():
     head = CanonicalPowerFoamHead(
-        register_dim=8, hidden_dim=16, max_cells=4, prediction_mode="absolute",
-        radius_mode="pixel_footprint", density_mode="fixed", fixed_density=100.0,
+        register_dim=8,
+        hidden_dim=16,
+        max_cells=4,
+        prediction_mode="absolute",
+        radius_mode="pixel_footprint",
+        density_mode="fixed",
+        fixed_density=100.0,
         initialize_rgb_from_image=True,
     )
     images = torch.rand(1, 1, 3, 2, 2)
@@ -263,9 +280,7 @@ def test_farthest_point_selection_keeps_isolated_proposals():
 
 
 def test_confidence_scores_replace_the_first_in_voxel_representative():
-    points = torch.tensor(
-        [[0.0, 0.0, 0.0], [0.001, 0.0, 0.0], [3.0, 0.0, 0.0], [3.001, 0.0, 0.0]]
-    )
+    points = torch.tensor([[0.0, 0.0, 0.0], [0.001, 0.0, 0.0], [3.0, 0.0, 0.0], [3.001, 0.0, 0.0]])
     scores = torch.tensor([0.1, 0.9, 0.2, 0.8])
 
     unweighted = voxel_budget_indices(points, 2)
@@ -290,9 +305,7 @@ def test_confidence_scores_must_match_the_proposal_count():
 def test_incremental_containment_distinguishes_power_and_ball_criteria():
     # One kept site of physical radius 0.1 at the origin, then three newcomers
     # of radius 0.05 at increasing distance along x.
-    points = torch.tensor(
-        [[0.0, 0.0, 0.0], [0.02, 0.0, 0.0], [0.09, 0.0, 0.0], [0.5, 0.0, 0.0]]
-    )
+    points = torch.tensor([[0.0, 0.0, 0.0], [0.02, 0.0, 0.0], [0.09, 0.0, 0.0], [0.5, 0.0, 0.0]])
     raw_radii = inverse_softplus(torch.tensor([0.1, 0.05, 0.05, 0.05]))
 
     power = incremental_containment_indices(points, raw_radii, [1, 3], criterion="power")

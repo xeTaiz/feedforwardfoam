@@ -12,11 +12,7 @@ from torch import nn
 def inverse_softplus(value: torch.Tensor, beta: float = 100.0) -> torch.Tensor:
     """Convert a positive physical value to Power Foam's raw parameter domain."""
     scaled = beta * value
-    return torch.where(
-        scaled > 20.0,
-        value,
-        torch.log(torch.expm1(scaled)) / beta,
-    )
+    return value + torch.log(-torch.expm1(-scaled)) / beta
 
 
 def quaternions_from_positive_x(normals: torch.Tensor) -> torch.Tensor:
@@ -121,14 +117,10 @@ def uniform_selection_indices(count: int, budget: int, device: torch.device) -> 
     if budget <= 0:
         raise ValueError("Selection budget must be positive")
     selected = min(budget, count)
-    return torch.div(
-        torch.arange(selected, device=device) * count, selected, rounding_mode="floor"
-    )
+    return torch.div(torch.arange(selected, device=device) * count, selected, rounding_mode="floor")
 
 
-def farthest_point_indices(
-    points: torch.Tensor, budget: int, start_index: int = 0
-) -> torch.Tensor:
+def farthest_point_indices(points: torch.Tensor, budget: int, start_index: int = 0) -> torch.Tensor:
     """Select a deterministic farthest-point subset of world points.
 
     Voxel selection keeps one member per occupied cell and therefore drops
@@ -412,9 +404,7 @@ class CanonicalPowerFoamHead(nn.Module):
             else None
         )
         self.support_token_projection = (
-            nn.Conv2d(int(patch_token_dim), hidden_dim, 1)
-            if fusion_mode == "projected"
-            else None
+            nn.Conv2d(int(patch_token_dim), hidden_dim, 1) if fusion_mode == "projected" else None
         )
         # point residual, radius, quaternion, density, confidence/gate,
         # spherical axes, and spherical RGB values.
@@ -453,8 +443,12 @@ class CanonicalPowerFoamHead(nn.Module):
         if confidence.ndim == 3:
             confidence = confidence[:, None]
         if depth.shape[-2:] != image.shape[-2:]:
-            depth = F.interpolate(depth, size=image.shape[-2:], mode="bilinear", align_corners=False)
-            confidence = F.interpolate(confidence, size=image.shape[-2:], mode="bilinear", align_corners=False)
+            depth = F.interpolate(
+                depth, size=image.shape[-2:], mode="bilinear", align_corners=False
+            )
+            confidence = F.interpolate(
+                confidence, size=image.shape[-2:], mode="bilinear", align_corners=False
+            )
         return image, depth, confidence
 
     def forward(
@@ -522,12 +516,16 @@ class CanonicalPowerFoamHead(nn.Module):
             values[:, 4] = values[:, 4] + 1.0
         ray_map = canonical_ray_map.to(device=values.device, dtype=values.dtype).reshape(-1, 6)
         if ray_map.shape[0] != h * w:
-            ray_map = F.interpolate(
-                canonical_ray_map.permute(2, 0, 1)[None].to(values.dtype),
-                size=(h, w),
-                mode="bilinear",
-                align_corners=False,
-            )[0].permute(1, 2, 0).reshape(-1, 6)
+            ray_map = (
+                F.interpolate(
+                    canonical_ray_map.permute(2, 0, 1)[None].to(values.dtype),
+                    size=(h, w),
+                    mode="bilinear",
+                    align_corners=False,
+                )[0]
+                .permute(1, 2, 0)
+                .reshape(-1, 6)
+            )
         rays = ray_map[selected]
         depth = depth.clamp_min(1e-3)
         if self.base_depth_mode == "constant":
@@ -535,10 +533,7 @@ class CanonicalPowerFoamHead(nn.Module):
 
         ray_directions = ray_map[:, 3:].reshape(h, w, 3)
         if canonical_base_points is None:
-            base_points = (
-                ray_map[:, :3].reshape(h, w, 3)
-                + depth[0, 0, ..., None] * ray_directions
-            )
+            base_points = ray_map[:, :3].reshape(h, w, 3) + depth[0, 0, ..., None] * ray_directions
         else:
             base_points = canonical_base_points.to(values).permute(2, 0, 1)[None]
             if base_points.shape[-2:] != (h, w):
@@ -569,7 +564,9 @@ class CanonicalPowerFoamHead(nn.Module):
             footprint = depth[0, 0] * footprint / counts.clamp_min(1)
             scale = self.radius_scale_init * torch.exp(
                 self.radius_residual_log_scale
-                * torch.tanh(values[:, 3] if self.enable_radius_residual else torch.zeros_like(values[:, 3]))
+                * torch.tanh(
+                    values[:, 3] if self.enable_radius_residual else torch.zeros_like(values[:, 3])
+                )
             )
             physical_radii = footprint.reshape(-1)[selected].clamp_min(1e-4) * scale
         else:
@@ -645,8 +642,12 @@ class CanonicalPowerFoamHead(nn.Module):
 
         # Keep full upstream shapes. P0 constrains, rather than removes, 2D
         # surface texture: all sites are tied at the dipole and height is zero.
-        texel_sites = torch.zeros(m, self.num_texel_sites, 2, device=values.device, dtype=values.dtype)
-        texel_height = torch.zeros(m, self.num_texel_sites, device=values.device, dtype=values.dtype)
+        texel_sites = torch.zeros(
+            m, self.num_texel_sites, 2, device=values.device, dtype=values.dtype
+        )
+        texel_height = torch.zeros(
+            m, self.num_texel_sites, device=values.device, dtype=values.dtype
+        )
         return FoamParameters(
             points=points,
             radii=radii,
