@@ -227,13 +227,10 @@ def _save_diagnostic_images(output_dir: Path, step: int, episode, outputs) -> No
 
 
 def _render_targets(params, target_views, bridge, representation: str, device: torch.device):
-    outputs = []
-    for target_view in target_views:
-        if representation == "foam":
-            outputs.append(bridge.render(params, camera_from_view(target_view, device)))
-        else:
-            outputs.append(bridge.render(params, target_view))
-    return outputs
+    if representation == "foam":
+        cameras = [camera_from_view(target_view, device) for target_view in target_views]
+        return bridge.render_many(params, cameras)
+    return [bridge.render(params, target_view) for target_view in target_views]
 
 
 def _episode_objective(

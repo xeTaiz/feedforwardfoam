@@ -158,8 +158,9 @@ class PowerFoamRendererBridge:
         object.__setattr__(scene, "sv", sv)
         return scene
 
-    def render(self, parameters: FoamParameters, camera) -> FoamRender:
-        result = self.build(parameters).forward(camera)
+    @staticmethod
+    def _render_scene(scene, camera) -> FoamRender:
+        result = scene.forward(camera)
         # Warp requires the incoming adjoints to have contiguous inner dimensions.
         # Perceptual losses transpose HWC renders to CHW and otherwise violate that
         # requirement during their backward pass.
@@ -169,3 +170,11 @@ class PowerFoamRendererBridge:
             normal=result[3],
             depth=result[4],
         )
+
+    def render(self, parameters: FoamParameters, camera) -> FoamRender:
+        return self._render_scene(self.build(parameters), camera)
+
+    def render_many(self, parameters: FoamParameters, cameras) -> list[FoamRender]:
+        """Build topology once and render every target camera from that scene."""
+        scene = self.build(parameters)
+        return [self._render_scene(scene, camera) for camera in cameras]
