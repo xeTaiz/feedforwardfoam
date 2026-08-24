@@ -61,8 +61,8 @@ train:
   alpha_loss_weight: 0.0
   splatt3r_masked_rgb_reduction: true
   log_every: 10
-  validate_every: 5000
-  checkpoint_every: 1000
+  validate_every: 1000
+  checkpoint_every: 100
   validation_episodes: 40
   validation_render_bundles: true
   resample_episodes: true
