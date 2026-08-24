@@ -9,8 +9,37 @@ from PIL import Image
 
 from feedforwardfoam.data.multiscene import MultiSceneScanNetPP
 from feedforwardfoam.data.scannetpp import ScanNetPPDataset
+from scripts.render_scannetpp_depths import _mesh_in_nerfstudio_coordinates
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+class _MeshStub:
+    def __init__(self, vertices):
+        self.vertices = np.asarray(vertices, dtype=np.float64)
+
+    @property
+    def bounds(self):
+        return np.stack((self.vertices.min(axis=0), self.vertices.max(axis=0)))
+
+    def copy(self):
+        return _MeshStub(self.vertices.copy())
+
+    def apply_transform(self, transform):
+        self.vertices = (
+            self.vertices @ np.asarray(transform, dtype=np.float64)[:3, :3].T
+            + np.asarray(transform, dtype=np.float64)[:3, 3]
+        )
+
+
+def test_mesh_coordinate_check_allows_decimation_scale_bound_drift():
+    mesh = _MeshStub([[0.0, 0.0, 1.0], [2.0, 3.0, 4.0]])
+    expected = np.asarray([[0.002, 0.002, -3.998], [3.002, 2.002, -0.998]])
+    aligned = _mesh_in_nerfstudio_coordinates(mesh, {"aabb_range": expected.tolist()})
+    assert np.allclose(aligned.bounds, [[0.0, 0.0, -4.0], [3.0, 2.0, -1.0]])
+
+    with pytest.raises(ValueError, match="mesh bounds"):
+        _mesh_in_nerfstudio_coordinates(mesh, {"aabb_range": (expected + 0.02).tolist()})
 
 
 def _write_native_scene(root, scene_id: str, views: int = 12):

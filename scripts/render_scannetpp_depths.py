@@ -35,6 +35,11 @@ def _camera_value(frame: dict[str, Any], metadata: dict[str, Any], key: str) -> 
     return float(value)
 
 
+# The 5 cm reconstruction mesh and metadata AABB use different source meshes;
+# their extrema can differ by a few millimeters after decimation.
+MESH_BOUNDS_TOLERANCE_METERS = 5e-3
+
+
 def _mesh_as_trimesh(path: Path, trimesh_module: Any) -> Any:
     loaded = trimesh_module.load(path, process=False)
     if isinstance(loaded, trimesh_module.Scene):
@@ -50,7 +55,7 @@ def _mesh_in_nerfstudio_coordinates(mesh: Any, metadata: dict[str, Any]) -> Any:
     if expected_bounds is None:
         return mesh
     expected = np.asarray(expected_bounds, dtype=np.float64)
-    if np.allclose(mesh.bounds, expected, atol=1e-3):
+    if np.allclose(mesh.bounds, expected, rtol=0.0, atol=MESH_BOUNDS_TOLERANCE_METERS):
         return mesh
     # ScanNet++ exports meshes as (x, y, z), while its Nerfstudio DSLR poses
     # and aabb_range use (y, x, -z).
@@ -58,7 +63,7 @@ def _mesh_in_nerfstudio_coordinates(mesh: Any, metadata: dict[str, Any]) -> Any:
     transform[:3, :3] = np.asarray([[0.0, 1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, -1.0]])
     aligned = mesh.copy()
     aligned.apply_transform(transform)
-    if not np.allclose(aligned.bounds, expected, atol=1e-3):
+    if not np.allclose(aligned.bounds, expected, rtol=0.0, atol=MESH_BOUNDS_TOLERANCE_METERS):
         raise ValueError(
             "ScanNet++ mesh bounds do not match Nerfstudio aabb_range after "
             f"coordinate conversion: {aligned.bounds} versus {expected}"
