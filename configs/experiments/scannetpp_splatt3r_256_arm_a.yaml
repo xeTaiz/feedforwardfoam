@@ -50,7 +50,7 @@ data:
   load_depth: true
   image_downsample: 1
 train:
-  steps: 500000
+  steps: 50000
   scene_batch_size: 12
   learning_rate: 1.0e-05
   learning_rate_schedule: half_decay

@@ -133,7 +133,8 @@ quantiles; they are not used by this manifest.
   `docs/experiments/proposal_reduction_arms.md`. Containment merging (arm F) is
   quality-neutral and may be enabled as a structural guarantee. Revisit only if a pixel-space
   reduction arm beats arm B.
-- Retain `best_full.pt` / `best_support.pt`; cosine LR.
+- Retain `best_full.pt` / `best_support.pt`; 50,000 steps with one half-decay
+  milestone at step 25,000.
 
 ## 6. Remaining interpretation safeguards
 
