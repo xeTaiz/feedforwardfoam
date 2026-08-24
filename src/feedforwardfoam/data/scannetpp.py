@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
@@ -359,9 +360,12 @@ class ScanNetPPDataset(Dataset[NvsEpisode]):
     def episode_from_indices(self, indices: list[int]) -> NvsEpisode:
         if len(indices) != self.context_views + self.target_views:
             raise ValueError("Episode index count does not match context plus target views")
+        frames = [self.frames[index] for index in indices]
+        with ThreadPoolExecutor(max_workers=len(frames)) as pool:
+            views = tuple(pool.map(self._load_view, frames))
         return NvsEpisode(
-            context=tuple(self._load_view(self.frames[i]) for i in indices[: self.context_views]),
-            target=tuple(self._load_view(self.frames[i]) for i in indices[self.context_views :]),
+            context=views[: self.context_views],
+            target=views[self.context_views :],
             scene_id=self.scene_id,
         )
 
