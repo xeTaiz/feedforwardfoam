@@ -37,6 +37,23 @@ def _protocol_frame_names(scene_root: Path, image_directory: str) -> list[str]:
     return [str(Path("dslr") / image_directory / Path(name).name) for name in ordered_names]
 
 
+def _has_compatible_coverage(scene_root: Path, coverage_path: Path) -> bool:
+    scene_id = scene_root.name
+    train_names = json.loads((scene_root / "dslr" / "train_test_lists.json").read_text())["train"]
+    raw_frames = json.loads((scene_root / "dslr" / "nerfstudio" / "transforms.json").read_text())[
+        "frames"
+    ]
+    raw_by_name = {Path(frame["file_path"]).name: frame for frame in raw_frames}
+    good_count = sum(not raw_by_name[Path(name).name].get("is_bad") for name in train_names)
+    matrix = json.loads(coverage_path.read_text()).get(scene_id)
+    if not isinstance(matrix, list):
+        return False
+    dimension = len(matrix)
+    if dimension not in {len(train_names), good_count}:
+        return False
+    return all(isinstance(row, list) and len(row) == dimension for row in matrix)
+
+
 def build_manifest(
     *,
     scene_root: Path,
@@ -56,6 +73,7 @@ def build_manifest(
         if scene_id not in BAD_TRAIN_SCENES
         and (scene_root / scene_id).is_dir()
         and (coverage_root / f"{scene_id}.json").is_file()
+        and _has_compatible_coverage(scene_root / scene_id, coverage_root / f"{scene_id}.json")
     ]
     if not train:
         raise ValueError("No training scenes have both ScanNet++ data and Splatt3R coverage")

@@ -377,14 +377,16 @@ def test_manifest_builder_rejects_scenes_the_loader_cannot_load(tmp_path):
 
 def test_splatt3r_manifest_builder_preserves_every_fixed_bin_tuple(tmp_path):
     _write_native_scene(tmp_path, "train-a")
+    _write_native_scene(tmp_path, "train-b")
     _write_native_scene(tmp_path, "val-a")
     split_root = tmp_path / "splits"
     split_root.mkdir()
-    (split_root / "nvs_sem_train.txt").write_text("train-a\n")
+    (split_root / "nvs_sem_train.txt").write_text("train-a\ntrain-b\n")
     (split_root / "nvs_sem_val.txt").write_text("val-a\n")
     coverage_root = tmp_path / "coverage"
     coverage_root.mkdir()
-    (coverage_root / "train-a.json").write_text("{}")
+    (coverage_root / "train-a.json").write_text(json.dumps({"train-a": np.ones((12, 12)).tolist()}))
+    (coverage_root / "train-b.json").write_text(json.dumps({"train-b": np.ones((5, 5)).tolist()}))
     assets = tmp_path / "assets"
     assets.mkdir()
     for thresholds in ("0.9_0.9", "0.7_0.7", "0.5_0.5", "0.3_0.3"):
