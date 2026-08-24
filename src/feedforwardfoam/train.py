@@ -922,7 +922,7 @@ def train(
     history: list[dict[str, float]] = []
     start_step = 1
     if resume is not None:
-        state = torch.load(resume, map_location=device, weights_only=False)
+        state = torch.load(resume, map_location="cpu", weights_only=False)
         head.load_state_dict(state["head"])
         optimizer.load_state_dict(state["optimizer"])
         if scheduler is not None and "scheduler" in state:
