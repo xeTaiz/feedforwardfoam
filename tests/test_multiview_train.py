@@ -61,6 +61,20 @@ def test_episode_prefetch_starts_next_load_before_current_compute(monkeypatch):
     assert sampled_indices == [3, 4]
 
 
+def test_stable_gradient_clip_handles_finite_float32_norm_overflow():
+    parameters = [torch.nn.Parameter(torch.zeros(4)) for _ in range(2)]
+    for parameter in parameters:
+        parameter.grad = torch.full_like(parameter, 1e30)
+
+    total_norm = train_module._clip_grad_norm_stable(parameters, 1.0)
+
+    assert total_norm == pytest.approx(8**0.5 * 1e30)
+    clipped_norm = torch.linalg.vector_norm(
+        torch.cat([parameter.grad.double() for parameter in parameters])
+    )
+    assert clipped_norm == pytest.approx(1.0)
+
+
 def test_triplet_geometry_detects_midpoint_target():
     context_0 = _view(0.0)
     context_1 = _view(0.0)

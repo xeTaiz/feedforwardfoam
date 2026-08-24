@@ -179,6 +179,24 @@ def _prefetched_episodes(
             yield episode
 
 
+@torch.no_grad()
+def _clip_grad_norm_stable(parameters, max_norm: float) -> torch.Tensor:
+    """Clip finite float32 gradients without overflowing their aggregate norm."""
+    gradients = [parameter.grad for parameter in parameters if parameter.grad is not None]
+    if not gradients:
+        return torch.zeros((), dtype=torch.float64)
+    norms = torch.stack(
+        [torch.linalg.vector_norm(gradient, dtype=torch.float64) for gradient in gradients]
+    )
+    total_norm = torch.linalg.vector_norm(norms)
+    if not torch.isfinite(total_norm):
+        raise RuntimeError("Gradient norm is non-finite")
+    coefficient = (max_norm / (total_norm + 1e-6)).clamp(max=1.0)
+    for gradient in gradients:
+        gradient.mul_(coefficient.to(device=gradient.device, dtype=gradient.dtype))
+    return total_norm
+
+
 def _configured_fixed_episode(dataset, config: dict[str, Any]) -> NvsEpisode | None:
     data_cfg = config["data"]
     context_names = data_cfg.get("context_names")
@@ -993,10 +1011,9 @@ def train(
                 loss_scale=1.0 / scene_batch_size,
             )
             batch_stats.append(episode_stats)
-        grad_norm = torch.nn.utils.clip_grad_norm_(
+        grad_norm = _clip_grad_norm_stable(
             head.parameters(),
             float(train_cfg.get("gradient_clip_norm", 1.0)),
-            error_if_nonfinite=True,
         )
         optimizer.step()
         if scheduler is not None:
