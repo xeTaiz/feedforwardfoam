@@ -123,13 +123,23 @@ class ScanNetPPDataset(Dataset[NvsEpisode]):
             coverage_payload: dict[str, Any] = json.loads(Path(overlap_path).read_text())
             if self.scene_id not in coverage_payload:
                 raise ValueError(f"Coverage file does not contain scene {self.scene_id}")
-            self.coverage = torch.tensor(coverage_payload[self.scene_id], dtype=torch.float32)
-            self.coverage_frame_indices = self._splatt3r_frame_indices()
-            expected = len(self.coverage_frame_indices)
-            if self.coverage.shape != (expected, expected):
+            coverage = torch.tensor(coverage_payload[self.scene_id], dtype=torch.float32)
+            (
+                self.coverage_frame_indices,
+                coverage_indices,
+                protocol_count,
+            ) = self._splatt3r_frame_indices()
+            selected_count = len(self.coverage_frame_indices)
+            if coverage.shape == (protocol_count, protocol_count):
+                index = torch.tensor(coverage_indices, dtype=torch.long)
+                coverage = coverage[index][:, index]
+            elif coverage.shape != (selected_count, selected_count):
                 raise ValueError(
-                    f"Coverage matrix is {tuple(self.coverage.shape)}, expected {(expected, expected)}"
+                    f"Coverage matrix is {tuple(coverage.shape)}, expected either "
+                    f"{(protocol_count, protocol_count)} or "
+                    f"{(selected_count, selected_count)}"
                 )
+            self.coverage = coverage
 
     def __len__(self) -> int:
         return len(self.frames)
@@ -149,7 +159,7 @@ class ScanNetPPDataset(Dataset[NvsEpisode]):
                 return candidate
         raise FileNotFoundError(f"Missing undistorted ScanNet++ depth map: {candidates[0]}")
 
-    def _splatt3r_frame_indices(self) -> list[int]:
+    def _splatt3r_frame_indices(self) -> tuple[list[int], list[int], int]:
         split_path = self.scene_root / "dslr" / "train_test_lists.json"
         transforms_path = self.scene_root / "dslr" / "nerfstudio" / "transforms.json"
         if not split_path.exists() or not transforms_path.exists():
@@ -163,15 +173,17 @@ class ScanNetPPDataset(Dataset[NvsEpisode]):
         native_by_name = {
             Path(frame["file_path"]).name: index for index, frame in enumerate(self.frames)
         }
-        ordered: list[int] = []
-        for raw_name in train_names:
+        native_indices: list[int] = []
+        coverage_indices: list[int] = []
+        for coverage_index, raw_name in enumerate(train_names):
             name = Path(raw_name).name
             if raw_by_name[name].get("is_bad"):
                 continue
             if name not in native_by_name:
                 raise ValueError(f"Splatt3R frame is absent from undistorted metadata: {name}")
-            ordered.append(native_by_name[name])
-        return ordered
+            native_indices.append(native_by_name[name])
+            coverage_indices.append(coverage_index)
+        return native_indices, coverage_indices, len(train_names)
 
     def _load_view(self, frame: dict) -> View:
         depth = None

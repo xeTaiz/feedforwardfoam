@@ -112,6 +112,11 @@ def test_native_scannetpp_fov_uses_camera_units_for_scaled_images(tmp_path):
 
 def test_splatt3r_overlap_sampler_uses_coverage_and_four_targets(tmp_path):
     scene = _write_native_scene(tmp_path, "overlap")
+    for metadata_name in ("transforms.json", "transforms_undistorted.json"):
+        metadata_path = scene / "dslr" / "nerfstudio" / metadata_name
+        metadata = json.loads(metadata_path.read_text())
+        metadata["frames"][0]["is_bad"] = True
+        metadata_path.write_text(json.dumps(metadata))
     coverage = np.full((12, 12), 0.8, dtype=np.float32)
     np.fill_diagonal(coverage, 1.0)
     coverage_path = tmp_path / "overlap.json"
@@ -137,6 +142,7 @@ def test_splatt3r_overlap_sampler_uses_coverage_and_four_targets(tmp_path):
     assert [view.name for view in first.context + first.target] == [
         view.name for view in repeated.context + repeated.target
     ]
+    assert all(not view.name.endswith("frame_000.JPG") for view in first.context + first.target)
 
 
 def test_multiscene_split_sampling_and_state_roundtrip(tmp_path):
