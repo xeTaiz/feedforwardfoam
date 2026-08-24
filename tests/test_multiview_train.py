@@ -1,4 +1,5 @@
 from types import SimpleNamespace
+from threading import Event
 
 import pytest
 import torch
@@ -37,6 +38,27 @@ def test_renderer_contiguizes_transposed_loss_gradient():
     rendered = _with_contiguous_backward(CaptureGradient.apply(source))
     rendered.permute(2, 0, 1).sum().backward()
     assert observed == [True]
+
+
+def test_episode_prefetch_starts_next_load_before_current_compute(monkeypatch):
+    second_started = Event()
+    release_second = Event()
+    sampled_indices = []
+
+    def sample(_dataset, index, _resample, _fixed_episode):
+        sampled_indices.append(index)
+        if index == 4:
+            second_started.set()
+            assert release_second.wait(timeout=1)
+        return index
+
+    monkeypatch.setattr(train_module, "_sample_episode", sample)
+    episodes = train_module._prefetched_episodes(None, 3, 2, True, None)
+    assert next(episodes) == 3
+    assert second_started.wait(timeout=1)
+    release_second.set()
+    assert next(episodes) == 4
+    assert sampled_indices == [3, 4]
 
 
 def test_triplet_geometry_detects_midpoint_target():

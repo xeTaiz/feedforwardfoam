@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
@@ -153,6 +154,29 @@ def _sample_episode(
     if episode is None:
         raise ValueError("A fixed episode is required when resampling is disabled")
     return episode
+
+
+def _prefetched_episodes(
+    dataset,
+    start_index: int,
+    count: int,
+    resample: bool,
+    fixed_episode: NvsEpisode | None,
+):
+    """Load episode n+1 while the caller computes episode n."""
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(_sample_episode, dataset, start_index, resample, fixed_episode)
+        for offset in range(count):
+            episode = future.result()
+            if offset + 1 < count:
+                future = pool.submit(
+                    _sample_episode,
+                    dataset,
+                    start_index + offset + 1,
+                    resample,
+                    fixed_episode,
+                )
+            yield episode
 
 
 def _configured_fixed_episode(dataset, config: dict[str, Any]) -> NvsEpisode | None:
@@ -947,9 +971,16 @@ def train(
         batch_stats: list[dict[str, float]] = []
         outputs = None
         episode = None
-        for batch_index in range(scene_batch_size):
-            sample_index = (step - 1) * scene_batch_size + batch_index
-            episode = _sample_episode(train_dataset, sample_index, resample, fixed_episode)
+        start_index = (step - 1) * scene_batch_size
+        for batch_index, episode in enumerate(
+            _prefetched_episodes(
+                train_dataset,
+                start_index,
+                scene_batch_size,
+                resample,
+                fixed_episode,
+            )
+        ):
             episode_stats, outputs = _training_episode(
                 head=head,
                 backbone=backbone,
