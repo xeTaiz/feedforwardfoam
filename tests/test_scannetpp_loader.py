@@ -9,7 +9,10 @@ from PIL import Image
 
 from feedforwardfoam.data.multiscene import MultiSceneScanNetPP
 from feedforwardfoam.data.scannetpp import ScanNetPPDataset
-from scripts.render_scannetpp_depths import _mesh_in_nerfstudio_coordinates
+from scripts.render_scannetpp_depths import (
+    _is_valid_depth_image,
+    _mesh_in_nerfstudio_coordinates,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -40,6 +43,14 @@ def test_mesh_coordinate_check_allows_decimation_scale_bound_drift():
 
     with pytest.raises(ValueError, match="mesh bounds"):
         _mesh_in_nerfstudio_coordinates(mesh, {"aabb_range": (expected + 0.02).tolist()})
+
+
+def test_depth_image_validation_rejects_truncated_png(tmp_path):
+    depth_path = tmp_path / "depth.png"
+    Image.fromarray(np.ones((4, 4), dtype=np.uint16)).save(depth_path)
+    assert _is_valid_depth_image(depth_path)
+    depth_path.write_bytes(depth_path.read_bytes()[:20])
+    assert not _is_valid_depth_image(depth_path)
 
 
 def _write_native_scene(root, scene_id: str, views: int = 12):

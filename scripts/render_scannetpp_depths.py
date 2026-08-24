@@ -85,6 +85,17 @@ def _invalidate_anonymous_pixels(
     return depth
 
 
+def _is_valid_depth_image(path: Path) -> bool:
+    if not path.is_file() or path.stat().st_size == 0:
+        return False
+    try:
+        with Image.open(path) as image:
+            image.verify()
+            return image.format == "PNG" and image.mode in {"I", "I;16"}
+    except OSError:
+        return False
+
+
 def render_scene(
     scene_root: Path,
     image_directory: str,
@@ -125,7 +136,7 @@ def render_scene(
             if not image_path.is_file():
                 continue
             depth_path = depth_root / f"{image_path.stem}.png"
-            if not overwrite and depth_path.is_file() and depth_path.stat().st_size > 0:
+            if not overwrite and _is_valid_depth_image(depth_path):
                 skipped += 1
                 continue
             with Image.open(image_path) as image:
