@@ -5,9 +5,12 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
+import threading
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import torch
 import torch.nn.functional as F
 from PIL import Image
@@ -55,6 +58,7 @@ class ScanNetPPDataset(Dataset[NvsEpisode]):
         native_image_directory: str = "resized_undistorted_images",
         resize_mode: str = "area",
         load_depth: bool = False,
+        tensor_cache_root: str | Path | None = None,
         include_bad_frames: bool = False,
         overlap_path: str | Path | None = None,
         context_overlap_threshold: float = 0.5,
@@ -73,6 +77,7 @@ class ScanNetPPDataset(Dataset[NvsEpisode]):
             raise ValueError("resize_mode must be 'area' or 'lanczos'")
         self.resize_mode = resize_mode
         self.load_depth = load_depth
+        self.tensor_cache_root = Path(tensor_cache_root) if tensor_cache_root is not None else None
         self.context_overlap_threshold = context_overlap_threshold
         self.target_overlap_threshold = target_overlap_threshold
         self.generator = torch.Generator().manual_seed(seed)
@@ -185,85 +190,133 @@ class ScanNetPPDataset(Dataset[NvsEpisode]):
             coverage_indices.append(coverage_index)
         return native_indices, coverage_indices, len(train_names)
 
+    def _tensor_cache_path(self, frame: dict) -> Path | None:
+        if self.tensor_cache_root is None or not self.native:
+            return None
+        size = (
+            f"{self.image_resolution}px"
+            if self.image_resolution is not None
+            else f"downsample-{self.image_downsample}"
+        )
+        variant = f"v1-{size}-{self.resize_mode}-depth-{int(self.load_depth)}"
+        return (
+            self.tensor_cache_root
+            / variant
+            / self.scene_id
+            / f"{Path(str(frame['file_path'])).stem}.npz"
+        )
+
+    def _load_tensor_cache(self, frame: dict) -> tuple[torch.Tensor, torch.Tensor | None] | None:
+        path = self._tensor_cache_path(frame)
+        if path is None or not path.is_file():
+            return None
+        with np.load(path, allow_pickle=False) as payload:
+            rgb = torch.from_numpy(payload["image"].copy())
+            depth_array = payload["depth"]
+            depth = torch.from_numpy(depth_array.copy()) if depth_array.size else None
+        return rgb, depth
+
+    def _store_tensor_cache(
+        self, frame: dict, rgb: torch.Tensor, depth: torch.Tensor | None
+    ) -> None:
+        path = self._tensor_cache_path(frame)
+        if path is None:
+            return
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp.npz")
+        try:
+            np.savez_compressed(
+                temporary,
+                image=rgb.numpy(),
+                depth=np.empty((0,), dtype=np.float32) if depth is None else depth.numpy(),
+            )
+            os.replace(temporary, path)
+        finally:
+            temporary.unlink(missing_ok=True)
+
     def _load_view(self, frame: dict) -> View:
         depth = None
+        cached = False
         if self.native:
             assert self.camera is not None
             image_path = self._native_image_path(frame)
-            rgb = torch.from_numpy(
-                __import__("numpy").asarray(Image.open(image_path).convert("RGB")).copy()
-            )
-            image_height, image_width = rgb.shape[:2]
             camera_width = int(self.camera["w"])
             camera_height = int(self.camera["h"])
-            if abs(image_width / image_height - camera_width / camera_height) > 1e-3:
-                raise ValueError(
-                    "Native ScanNet++ image aspect ratio does not match camera metadata"
-                )
-            crop_size = min(image_height, image_width)
-            top = (image_height - crop_size) // 2
-            left = (image_width - crop_size) // 2
-            rgb = rgb[top : top + crop_size, left : left + crop_size]
-            if self.load_depth:
-                depth = torch.from_numpy(
-                    __import__("numpy").asarray(Image.open(self._native_depth_path(frame))).copy()
-                ).float()
-                depth_height, depth_width = depth.shape[:2]
-                if abs(depth_width / depth_height - camera_width / camera_height) > 1e-3:
-                    raise ValueError(
-                        "Native ScanNet++ depth aspect ratio does not match camera metadata"
-                    )
-                depth_crop = min(depth_height, depth_width)
-                depth_top = (depth_height - depth_crop) // 2
-                depth_left = (depth_width - depth_crop) // 2
-                depth = depth[
-                    depth_top : depth_top + depth_crop, depth_left : depth_left + depth_crop
-                ]
-                depth = depth / 1000.0
             camera_crop_size = min(camera_width, camera_height)
             fov_x = 2.0 * math.atan(0.5 * camera_crop_size / float(self.camera["fl_x"]))
             c2w = frame["transform_matrix"]
             name = str(image_path.relative_to(self.scene_root))
+            cached_tensors = self._load_tensor_cache(frame)
+            if cached_tensors is not None:
+                rgb, depth = cached_tensors
+                cached = True
+            else:
+                rgb = torch.from_numpy(np.asarray(Image.open(image_path).convert("RGB")).copy())
+                image_height, image_width = rgb.shape[:2]
+                if abs(image_width / image_height - camera_width / camera_height) > 1e-3:
+                    raise ValueError(
+                        "Native ScanNet++ image aspect ratio does not match camera metadata"
+                    )
+                crop_size = min(image_height, image_width)
+                top = (image_height - crop_size) // 2
+                left = (image_width - crop_size) // 2
+                rgb = rgb[top : top + crop_size, left : left + crop_size]
+                if self.load_depth:
+                    depth = torch.from_numpy(
+                        np.asarray(Image.open(self._native_depth_path(frame))).copy()
+                    ).float()
+                    depth_height, depth_width = depth.shape[:2]
+                    if abs(depth_width / depth_height - camera_width / camera_height) > 1e-3:
+                        raise ValueError(
+                            "Native ScanNet++ depth aspect ratio does not match camera metadata"
+                        )
+                    depth_crop = min(depth_height, depth_width)
+                    depth_top = (depth_height - depth_crop) // 2
+                    depth_left = (depth_width - depth_crop) // 2
+                    depth = depth[
+                        depth_top : depth_top + depth_crop, depth_left : depth_left + depth_crop
+                    ]
+                    depth = depth / 1000.0
         else:
             image_path = self.scene_root / frame["image"]
-            rgb = torch.from_numpy(
-                __import__("numpy").asarray(Image.open(image_path).convert("RGB")).copy()
-            )
+            rgb = torch.from_numpy(np.asarray(Image.open(image_path).convert("RGB")).copy())
             fov_x = float(frame["fov_x_radians"])
             c2w = frame["c2w"]
             name = frame["image"]
-        if self.image_resolution is not None and self.resize_mode == "lanczos":
-            resized = Image.fromarray(rgb.numpy()).resize(
-                (self.image_resolution, self.image_resolution), Image.Resampling.LANCZOS
-            )
-            rgb = torch.from_numpy(__import__("numpy").asarray(resized).copy())
-        rgb = rgb.float() / 255.0
-        if self.image_resolution is not None and self.resize_mode == "area":
-            rgb = F.interpolate(
-                rgb.permute(2, 0, 1)[None],
-                size=(self.image_resolution, self.image_resolution),
-                mode="area",
-            )[0].permute(1, 2, 0)
-        elif self.image_resolution is None and self.image_downsample > 1:
-            height, width = rgb.shape[:2]
-            rgb = F.interpolate(
-                rgb.permute(2, 0, 1)[None],
-                size=(height // self.image_downsample, width // self.image_downsample),
-                mode="area",
-            )[0].permute(1, 2, 0)
-        if depth is not None:
-            if self.image_resolution is not None:
-                depth = F.interpolate(
-                    depth[None, None],
+        if not cached:
+            if self.image_resolution is not None and self.resize_mode == "lanczos":
+                resized = Image.fromarray(rgb.numpy()).resize(
+                    (self.image_resolution, self.image_resolution), Image.Resampling.LANCZOS
+                )
+                rgb = torch.from_numpy(np.asarray(resized).copy())
+            rgb = rgb.float() / 255.0
+            if self.image_resolution is not None and self.resize_mode == "area":
+                rgb = F.interpolate(
+                    rgb.permute(2, 0, 1)[None],
                     size=(self.image_resolution, self.image_resolution),
-                    mode="nearest-exact",
-                )[0, 0]
-            elif self.image_downsample > 1:
-                depth = F.interpolate(
-                    depth[None, None],
-                    size=(rgb.shape[0], rgb.shape[1]),
-                    mode="nearest-exact",
-                )[0, 0]
+                    mode="area",
+                )[0].permute(1, 2, 0)
+            elif self.image_resolution is None and self.image_downsample > 1:
+                height, width = rgb.shape[:2]
+                rgb = F.interpolate(
+                    rgb.permute(2, 0, 1)[None],
+                    size=(height // self.image_downsample, width // self.image_downsample),
+                    mode="area",
+                )[0].permute(1, 2, 0)
+            if depth is not None:
+                if self.image_resolution is not None:
+                    depth = F.interpolate(
+                        depth[None, None],
+                        size=(self.image_resolution, self.image_resolution),
+                        mode="nearest-exact",
+                    )[0, 0]
+                elif self.image_downsample > 1:
+                    depth = F.interpolate(
+                        depth[None, None],
+                        size=(rgb.shape[0], rgb.shape[1]),
+                        mode="nearest-exact",
+                    )[0, 0]
+            self._store_tensor_cache(frame, rgb, depth)
         return View(
             image=rgb,
             c2w=torch.tensor(c2w, dtype=torch.float32),
@@ -343,18 +396,21 @@ class ScanNetPPDataset(Dataset[NvsEpisode]):
             return str(self._native_image_path(frame).relative_to(self.scene_root))
         return str(frame["image"])
 
-    def episode_from_names(self, context_names: list[str], target_names: list[str]) -> NvsEpisode:
-        """Load one explicit, reproducible episode by scene-relative image name."""
+    def _indices_from_names(self, context_names: list[str], target_names: list[str]) -> list[int]:
         requested = [str(Path(name)) for name in (*context_names, *target_names)]
         if len(context_names) != self.context_views or len(target_names) != self.target_views:
-            raise ValueError("Configured names do not match context/target view counts")
+            raise ValueError("Configured names do not match context plus target view counts")
         if len(set(requested)) != len(requested):
             raise ValueError("Configured context and target names must be distinct")
         name_to_index = {self._frame_name(frame): index for index, frame in enumerate(self.frames)}
         missing = [name for name in requested if name not in name_to_index]
         if missing:
             raise ValueError(f"Configured ScanNet++ images not found: {missing}")
-        return self.episode_from_indices([name_to_index[name] for name in requested])
+        return [name_to_index[name] for name in requested]
+
+    def episode_from_names(self, context_names: list[str], target_names: list[str]) -> NvsEpisode:
+        """Load one explicit, reproducible episode by scene-relative image name."""
+        return self.episode_from_indices(self._indices_from_names(context_names, target_names))
 
     def episode_from_indices(self, indices: list[int]) -> NvsEpisode:
         if len(indices) != self.context_views + self.target_views:

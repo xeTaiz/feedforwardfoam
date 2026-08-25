@@ -121,6 +121,7 @@ def _build_datasets(config: dict[str, Any], data_root: Path):
             ),
             "resize_mode": str(data_cfg.get("resize_mode", "area")),
             "load_depth": bool(data_cfg.get("load_depth", False)),
+            "tensor_cache_root": data_cfg.get("tensor_cache_root"),
         }
         train_dataset = MultiSceneScanNetPP(
             **common,
@@ -162,8 +163,17 @@ def _prefetched_episodes(
     count: int,
     resample: bool,
     fixed_episode: NvsEpisode | None,
+    workers: int = 1,
 ):
-    """Load episode n+1 while the caller computes episode n."""
+    """Load selected episodes concurrently while preserving their sampled order."""
+    if workers <= 0:
+        raise ValueError("Episode prefetch workers must be positive")
+    if isinstance(dataset, MultiSceneScanNetPP) and resample and workers > 1:
+        requests = [dataset.sample_episode_request() for _ in range(count)]
+        with ThreadPoolExecutor(max_workers=min(workers, count)) as pool:
+            yield from pool.map(dataset.load_episode_request, requests)
+        return
+
     with ThreadPoolExecutor(max_workers=1) as pool:
         future = pool.submit(_sample_episode, dataset, start_index, resample, fixed_episode)
         for offset in range(count):
@@ -958,6 +968,9 @@ def train(
     scene_batch_size = int(train_cfg.get("scene_batch_size", 1))
     if scene_batch_size <= 0:
         raise ValueError("scene_batch_size must be positive")
+    episode_prefetch_workers = int(train_cfg.get("episode_prefetch_workers", 1))
+    if episode_prefetch_workers <= 0:
+        raise ValueError("episode_prefetch_workers must be positive")
     support_context_mode = str(train_cfg.get("support_mask_contexts", "all"))
     support_mask_source = str(train_cfg.get("support_mask_source", "predicted"))
     benchmark_metrics = bool(train_cfg.get("report_benchmark_metrics", False))
@@ -997,6 +1010,7 @@ def train(
                 scene_batch_size,
                 resample,
                 fixed_episode,
+                episode_prefetch_workers,
             )
         ):
             episode_stats, outputs = _training_episode(

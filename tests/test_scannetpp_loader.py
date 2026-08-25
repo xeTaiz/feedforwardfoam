@@ -105,6 +105,28 @@ def test_native_scannetpp_center_crops_and_samples_multiple_targets(tmp_path):
     assert episode.context[0].fov_x_radians == pytest.approx(2 * math.atan(3 / 8))
 
 
+def test_native_scannetpp_reuses_exact_resized_tensor_cache(tmp_path):
+    scene = _write_native_scene(tmp_path, "cached")
+    cache_root = tmp_path / "tensor-cache"
+    dataset = ScanNetPPDataset(
+        scene,
+        split="train",
+        context_views=1,
+        target_views=1,
+        image_resolution=8,
+        resize_mode="lanczos",
+        tensor_cache_root=cache_root,
+    )
+    frame = dataset.frames[0]
+    first = dataset._load_view(frame)
+    dataset._native_image_path(frame).unlink()
+
+    cached = dataset._load_view(frame)
+
+    np.testing.assert_array_equal(cached.image.numpy(), first.image.numpy())
+    assert list(cache_root.rglob("*.npz"))
+
+
 def test_native_scannetpp_fov_uses_camera_units_for_scaled_images(tmp_path):
     scene = _write_native_scene(tmp_path, "scaled")
     image_path = scene / "dslr" / "resized_undistorted_images" / "frame_000.JPG"

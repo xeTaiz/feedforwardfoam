@@ -61,6 +61,31 @@ def test_episode_prefetch_starts_next_load_before_current_compute(monkeypatch):
     assert sampled_indices == [3, 4]
 
 
+def test_multiscene_prefetch_loads_batch_concurrently_in_sampled_order(monkeypatch):
+    dataset = object.__new__(train_module.MultiSceneScanNetPP)
+    requested: list[int] = []
+    second_started = Event()
+
+    def sample_request():
+        requested.append(len(requested))
+        return requested[-1]
+
+    def load_request(request):
+        assert requested == [0, 1, 2]
+        if request == 0:
+            assert second_started.wait(timeout=1)
+        elif request == 1:
+            second_started.set()
+        return request
+
+    monkeypatch.setattr(dataset, "sample_episode_request", sample_request)
+    monkeypatch.setattr(dataset, "load_episode_request", load_request)
+
+    episodes = list(train_module._prefetched_episodes(dataset, 0, 3, True, None, workers=2))
+
+    assert episodes == [0, 1, 2]
+
+
 def test_stable_gradient_clip_handles_finite_float32_norm_overflow():
     parameters = [torch.nn.Parameter(torch.zeros(4)) for _ in range(2)]
     for parameter in parameters:

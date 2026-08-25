@@ -48,10 +48,12 @@ data:
   native_image_directory: resized_undistorted_images
   resize_mode: lanczos
   load_depth: true
+  tensor_cache_root: /tmp/feedforwardfoam-scannetpp-tensor-cache
   image_downsample: 1
 train:
   steps: 50000
   scene_batch_size: 12
+  episode_prefetch_workers: 4
   learning_rate: 1.0e-05
   learning_rate_schedule: half_decay
   weight_decay: 0.05

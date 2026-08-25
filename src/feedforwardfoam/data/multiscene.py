@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TypedDict, cast
 
@@ -17,6 +18,12 @@ class EpisodeEntry(TypedDict):
     context_names: list[str]
     target_names: list[str]
     bin: str
+
+
+@dataclass(frozen=True)
+class EpisodeRequest:
+    dataset: ScanNetPPDataset
+    indices: tuple[int, ...]
 
 
 class MultiSceneScanNetPP:
@@ -40,6 +47,7 @@ class MultiSceneScanNetPP:
         native_image_directory: str = "resized_undistorted_images",
         resize_mode: str = "area",
         load_depth: bool = False,
+        tensor_cache_root: str | Path | None = None,
     ) -> None:
         self.data_root = Path(data_root)
         manifest_path = Path(scene_manifest)
@@ -64,6 +72,7 @@ class MultiSceneScanNetPP:
         self.native_image_directory = native_image_directory
         self.resize_mode = resize_mode
         self.load_depth = load_depth
+        self.tensor_cache_root = Path(tensor_cache_root) if tensor_cache_root is not None else None
         self.generator = torch.Generator().manual_seed(seed)
         self.episode_entries: list[EpisodeEntry] | None = (
             cast(list[EpisodeEntry], entries) if all(explicit_flags) else None
@@ -103,6 +112,7 @@ class MultiSceneScanNetPP:
             native_image_directory=self.native_image_directory,
             resize_mode=self.resize_mode,
             load_depth=self.load_depth,
+            tensor_cache_root=self.tensor_cache_root,
             include_bad_frames=self.episode_entries is not None,
             overlap_path=overlap_path,
             context_overlap_threshold=self.context_overlap_threshold,
@@ -122,12 +132,28 @@ class MultiSceneScanNetPP:
             list(entry["context_names"]), list(entry["target_names"])
         )
 
-    def sample_episode(self) -> NvsEpisode:
+    def sample_episode_request(self) -> EpisodeRequest:
+        """Select one episode without loading its image tensors."""
         if self.episode_entries is not None:
             index = int(torch.randint(len(self.episode_entries), (), generator=self.generator))
-            return self._episode_from_entry(self.episode_entries[index])
-        index = int(torch.randint(len(self.datasets), (), generator=self.generator))
-        return self.datasets[index].sample_episode()
+            entry = self.episode_entries[index]
+            dataset = self._dataset_for(str(entry["scene_id"]))
+            indices = dataset._indices_from_names(
+                list(entry["context_names"]), list(entry["target_names"])
+            )
+        else:
+            index = int(torch.randint(len(self.datasets), (), generator=self.generator))
+            dataset = self.datasets[index]
+            indices = dataset._sample_indices(dataset.generator)
+        return EpisodeRequest(dataset=dataset, indices=tuple(indices))
+
+    @staticmethod
+    def load_episode_request(request: EpisodeRequest) -> NvsEpisode:
+        """Load a previously selected episode; safe to run in a CPU worker."""
+        return request.dataset.episode_from_indices(list(request.indices))
+
+    def sample_episode(self) -> NvsEpisode:
+        return self.load_episode_request(self.sample_episode_request())
 
     def __len__(self) -> int:
         return len(self.episode_entries) if self.episode_entries is not None else len(self.datasets)
