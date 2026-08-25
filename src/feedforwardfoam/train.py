@@ -20,6 +20,7 @@ from .data.multiscene import MultiSceneScanNetPP
 from .data.types import NvsEpisode
 from .data.scannetpp import ScanNetPPDataset
 from .fusion import (
+    InvalidDepthGaugeError,
     align_depths_to_calibrated_cameras,
     build_canonical_support,
     laser_context_support_mask,
@@ -1003,7 +1004,7 @@ def train(
         outputs = None
         episode = None
         start_index = (step - 1) * scene_batch_size
-        for batch_index, episode in enumerate(
+        episodes = iter(
             _prefetched_episodes(
                 train_dataset,
                 start_index,
@@ -1012,19 +1013,42 @@ def train(
                 fixed_episode,
                 episode_prefetch_workers,
             )
-        ):
-            episode_stats, outputs = _training_episode(
-                head=head,
-                backbone=backbone,
-                bridge=bridge,
-                episode=episode,
-                representation=representation,
-                device=device,
-                train_cfg=train_cfg,
-                lpips_model=lpips_model,
-                loss_scale=1.0 / scene_batch_size,
-            )
-            batch_stats.append(episode_stats)
+        )
+        rejected_depth_gauge_episodes = 0
+        for batch_index in range(scene_batch_size):
+            while True:
+                try:
+                    episode = next(episodes)
+                except StopIteration:
+                    episode = _sample_episode(
+                        train_dataset,
+                        start_index + scene_batch_size + rejected_depth_gauge_episodes,
+                        resample,
+                        fixed_episode,
+                    )
+                try:
+                    episode_stats, outputs = _training_episode(
+                        head=head,
+                        backbone=backbone,
+                        bridge=bridge,
+                        episode=episode,
+                        representation=representation,
+                        device=device,
+                        train_cfg=train_cfg,
+                        lpips_model=lpips_model,
+                        loss_scale=1.0 / scene_batch_size,
+                    )
+                except InvalidDepthGaugeError:
+                    if not isinstance(train_dataset, MultiSceneScanNetPP) or not resample:
+                        raise
+                    rejected_depth_gauge_episodes += 1
+                    if rejected_depth_gauge_episodes > scene_batch_size:
+                        raise RuntimeError(
+                            "Too many sampled episodes have an invalid calibrated depth gauge"
+                        )
+                    continue
+                batch_stats.append(episode_stats)
+                break
         grad_norm = _clip_grad_norm_stable(
             head.parameters(),
             float(train_cfg.get("gradient_clip_norm", 1.0)),
@@ -1046,6 +1070,7 @@ def train(
                 "learning_rate": float(optimizer.param_groups[0]["lr"]),
                 "scene_batch_size": float(scene_batch_size),
                 "supervised_target_views": sum(stats["target_views"] for stats in batch_stats),
+                "rejected_depth_gauge_episodes": float(rejected_depth_gauge_episodes),
             }
         )
         if val_records and step % int(train_cfg["validate_every"]) == 0:

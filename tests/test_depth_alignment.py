@@ -1,7 +1,11 @@
 import torch
+import pytest
 
 from feedforwardfoam.data.types import View
-from feedforwardfoam.fusion import align_depths_to_calibrated_cameras
+from feedforwardfoam.fusion import (
+    InvalidDepthGaugeError,
+    align_depths_to_calibrated_cameras,
+)
 
 
 def _view(x: float) -> View:
@@ -43,3 +47,15 @@ def test_depth_alignment_does_not_clip_valid_scene_scale():
     assert torch.allclose(transform.scale, torch.tensor(20.0))
     assert not transform.bound_hit
     assert torch.allclose(aligned, torch.full_like(aligned, 20.0))
+
+
+def test_depth_alignment_marks_zero_calibrated_baseline_as_resampleable():
+    predicted_c2w = torch.eye(4).repeat(1, 2, 1, 1)
+    predicted_c2w[0, 1, 0, 3] = 1.0
+    features = {
+        "depth": torch.ones(1, 2, 1, 2, 2),
+        "predicted_extrinsics": torch.linalg.inv(predicted_c2w),
+    }
+
+    with pytest.raises(InvalidDepthGaugeError, match="scale: 0"):
+        align_depths_to_calibrated_cameras(features, (_view(0.0), _view(0.0)))

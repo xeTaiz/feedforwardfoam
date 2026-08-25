@@ -11,6 +11,10 @@ from .data.types import View
 from .renderer import pinhole_ray_map_from_view
 
 
+class InvalidDepthGaugeError(ValueError):
+    """A sampled context pair cannot establish a finite positive depth gauge."""
+
+
 @dataclass(frozen=True)
 class DepthAlignment:
     """Scale from predicted VGGT z-depth into the calibrated scene gauge."""
@@ -89,7 +93,9 @@ def align_depths_to_calibrated_cameras(
     ratios = calibrated_distances[valid] / predicted_distances[valid]
     raw_scale = ratios.median() if ratios.numel() else torch.ones((), device=depths.device)
     if not torch.isfinite(raw_scale) or not minimum_scale <= float(raw_scale) <= maximum_scale:
-        raise ValueError(f"Invalid calibrated depth-gauge scale: {float(raw_scale):.6g}")
+        raise InvalidDepthGaugeError(
+            f"Invalid calibrated depth-gauge scale: {float(raw_scale):.6g}"
+        )
     aligned = (depths * raw_scale).clamp_min(1e-3)
     return aligned, DepthAlignment(
         scale=raw_scale,
