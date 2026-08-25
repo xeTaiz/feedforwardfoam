@@ -7,6 +7,7 @@ import json
 import math
 import os
 import threading
+import warnings
 from pathlib import Path
 from typing import Any
 
@@ -16,7 +17,10 @@ import torch.nn.functional as F
 from PIL import Image
 from torch.utils.data import Dataset
 
+
 from .types import NvsEpisode, View
+
+_TENSOR_CACHE_WRITES_DISABLED = threading.Event()
 
 
 def validate_native_camera(camera: dict) -> None:
@@ -220,19 +224,31 @@ class ScanNetPPDataset(Dataset[NvsEpisode]):
         self, frame: dict, rgb: torch.Tensor, depth: torch.Tensor | None
     ) -> None:
         path = self._tensor_cache_path(frame)
-        if path is None:
+        if path is None or _TENSOR_CACHE_WRITES_DISABLED.is_set():
             return
-        path.parent.mkdir(parents=True, exist_ok=True)
-        temporary = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp.npz")
+        temporary: Path | None = None
         try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            temporary = path.with_name(
+                f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp.npz"
+            )
             np.savez_compressed(
                 temporary,
                 image=rgb.numpy(),
                 depth=np.empty((0,), dtype=np.float32) if depth is None else depth.numpy(),
             )
             os.replace(temporary, path)
+        except OSError as error:
+            if not _TENSOR_CACHE_WRITES_DISABLED.is_set():
+                _TENSOR_CACHE_WRITES_DISABLED.set()
+                warnings.warn(
+                    f"Disabling tensor-cache writes after storage error: {error}",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
         finally:
-            temporary.unlink(missing_ok=True)
+            if temporary is not None:
+                temporary.unlink(missing_ok=True)
 
     def _load_view(self, frame: dict) -> View:
         depth = None

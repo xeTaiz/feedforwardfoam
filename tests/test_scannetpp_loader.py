@@ -7,6 +7,7 @@ import numpy as np
 import pytest
 from PIL import Image
 
+import feedforwardfoam.data.scannetpp as scannetpp_module
 from feedforwardfoam.data.multiscene import MultiSceneScanNetPP
 from feedforwardfoam.data.scannetpp import ScanNetPPDataset
 from scripts.render_scannetpp_depths import (
@@ -125,6 +126,31 @@ def test_native_scannetpp_reuses_exact_resized_tensor_cache(tmp_path):
 
     np.testing.assert_array_equal(cached.image.numpy(), first.image.numpy())
     assert list(cache_root.rglob("*.npz"))
+
+
+def test_tensor_cache_storage_error_disables_writes_without_breaking_load(tmp_path, monkeypatch):
+    scene = _write_native_scene(tmp_path, "full-cache")
+    dataset = ScanNetPPDataset(
+        scene,
+        split="train",
+        context_views=1,
+        target_views=1,
+        image_resolution=8,
+        tensor_cache_root=tmp_path / "tensor-cache",
+    )
+
+    def fail_cache_write(*_args, **_kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(scannetpp_module.np, "savez_compressed", fail_cache_write)
+    scannetpp_module._TENSOR_CACHE_WRITES_DISABLED.clear()
+    try:
+        with pytest.warns(RuntimeWarning, match="Disabling tensor-cache writes"):
+            view = dataset._load_view(dataset.frames[0])
+        assert view.image.shape == (8, 8, 3)
+        assert scannetpp_module._TENSOR_CACHE_WRITES_DISABLED.is_set()
+    finally:
+        scannetpp_module._TENSOR_CACHE_WRITES_DISABLED.clear()
 
 
 def test_native_scannetpp_fov_uses_camera_units_for_scaled_images(tmp_path):
