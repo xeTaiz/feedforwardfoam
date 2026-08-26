@@ -286,6 +286,10 @@ def _render_targets(params, target_views, bridge, representation: str, device: t
     return [bridge.render(params, target_view) for target_view in target_views]
 
 
+class EmptySupportMaskError(ValueError):
+    """A sampled episode has no observable pixels for masked supervision."""
+
+
 def _episode_objective(
     outputs,
     target_views,
@@ -314,7 +318,9 @@ def _episode_objective(
                 rgb_loss = 3.0 * rgb_loss
             rgb_losses.append(rgb_loss)
         else:
-            raise ValueError("Masked benchmark supervision cannot use an empty support mask")
+            raise EmptySupportMaskError(
+                "Masked benchmark supervision cannot use an empty support mask"
+            )
         if lpips_weight > 0:
             if lpips_model is None:
                 raise ValueError("lpips_weight requires an LPIPS model")
@@ -1015,14 +1021,16 @@ def train(
             )
         )
         rejected_depth_gauge_episodes = 0
+        rejected_empty_support_episodes = 0
         for batch_index in range(scene_batch_size):
             while True:
+                rejected_episodes = rejected_depth_gauge_episodes + rejected_empty_support_episodes
                 try:
                     episode = next(episodes)
                 except StopIteration:
                     episode = _sample_episode(
                         train_dataset,
-                        start_index + scene_batch_size + rejected_depth_gauge_episodes,
+                        start_index + scene_batch_size + rejected_episodes,
                         resample,
                         fixed_episode,
                     )
@@ -1038,14 +1046,15 @@ def train(
                         lpips_model=lpips_model,
                         loss_scale=1.0 / scene_batch_size,
                     )
-                except InvalidDepthGaugeError:
+                except (InvalidDepthGaugeError, EmptySupportMaskError) as error:
                     if not isinstance(train_dataset, MultiSceneScanNetPP) or not resample:
                         raise
-                    rejected_depth_gauge_episodes += 1
-                    if rejected_depth_gauge_episodes > scene_batch_size:
-                        raise RuntimeError(
-                            "Too many sampled episodes have an invalid calibrated depth gauge"
-                        )
+                    if isinstance(error, InvalidDepthGaugeError):
+                        rejected_depth_gauge_episodes += 1
+                    else:
+                        rejected_empty_support_episodes += 1
+                    if rejected_episodes + 1 > scene_batch_size:
+                        raise RuntimeError("Too many sampled episodes are invalid") from error
                     continue
                 batch_stats.append(episode_stats)
                 break
@@ -1071,6 +1080,7 @@ def train(
                 "scene_batch_size": float(scene_batch_size),
                 "supervised_target_views": sum(stats["target_views"] for stats in batch_stats),
                 "rejected_depth_gauge_episodes": float(rejected_depth_gauge_episodes),
+                "rejected_empty_support_episodes": float(rejected_empty_support_episodes),
             }
         )
         if val_records and step % int(train_cfg["validate_every"]) == 0:

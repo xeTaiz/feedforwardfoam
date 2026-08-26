@@ -9,7 +9,13 @@ from feedforwardfoam.backbone import FrozenGeometryStub
 from feedforwardfoam.data.types import NvsEpisode, View
 from feedforwardfoam.head import CanonicalPowerFoamHead
 from feedforwardfoam.renderer import _with_contiguous_backward
-from feedforwardfoam.train import _episode_objective, _metrics, _predict, _triplet_geometry
+from feedforwardfoam.train import (
+    EmptySupportMaskError,
+    _episode_objective,
+    _metrics,
+    _predict,
+    _triplet_geometry,
+)
 
 
 def _view(value: float) -> View:
@@ -160,6 +166,20 @@ def test_splatt3r_masked_mse_sums_rgb_channels_per_supported_pixel():
     )
     assert rgb_loss == 3.0
     assert loss == 3.0
+
+
+def test_masked_objective_marks_empty_support_as_resampleable():
+    prediction = (SimpleNamespace(rgb=torch.ones(2, 2, 3), alpha=torch.ones(2, 2)),)
+
+    with pytest.raises(EmptySupportMaskError, match="empty support mask"):
+        _episode_objective(
+            prediction,
+            (_view(0.0),),
+            rgb_loss_name="mse",
+            alpha_weight=0.0,
+            device=torch.device("cpu"),
+            masks=[torch.zeros(2, 2, dtype=torch.bool)],
+        )
 
 
 class _StubBackboneWithCameras(torch.nn.Module):
