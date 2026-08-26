@@ -3,7 +3,7 @@ from types import SimpleNamespace
 from typing import cast
 
 from feedforwardfoam.data.multiscene import MultiSceneScanNetPP
-from feedforwardfoam.data.scannetpp import ScanNetPPDataset
+from feedforwardfoam.data.scannetpp import MissingDepthMapError, ScanNetPPDataset
 from scripts.cache_scannetpp_tensors import CacheTask, cache_tasks, materialize
 
 
@@ -68,5 +68,36 @@ def test_materialize_is_resumable_and_writes_missing_entries(tmp_path):
 
     result = materialize(tasks, workers=2, min_free_bytes=0, progress_every=2)
 
-    assert result["counts"] == {"cached": 1, "written": 1, "corrupt": 0}
+    assert result["counts"] == {
+        "cached": 1,
+        "written": 1,
+        "corrupt": 0,
+        "missing": 0,
+    }
     assert all(task.path.is_file() for task in tasks)
+
+
+def test_materialize_records_missing_depth_and_continues(tmp_path):
+    scene = _SceneDataset(tmp_path, "scene", frame_count=2)
+    original_load_view = scene._load_view
+
+    def load_view(frame):
+        if frame is scene.frames[0]:
+            raise MissingDepthMapError("missing depth")
+        original_load_view(frame)
+
+    scene._load_view = load_view
+    tasks = [
+        CacheTask(cast(ScanNetPPDataset, scene), frame, scene._tensor_cache_path(frame))
+        for frame in scene.frames
+    ]
+
+    result = materialize(tasks, workers=2, min_free_bytes=0, progress_every=2)
+
+    assert result["counts"] == {
+        "cached": 0,
+        "written": 1,
+        "corrupt": 0,
+        "missing": 1,
+    }
+    assert result["corrupt"] == ["missing depth"]

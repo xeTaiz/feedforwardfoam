@@ -27,6 +27,10 @@ class CorruptDepthMapError(RuntimeError):
     """A persistent depth PNG cannot be decoded and must not be sampled again."""
 
 
+class MissingDepthMapError(FileNotFoundError):
+    """A required depth PNG is absent and its frame must not be sampled again."""
+
+
 def validate_native_camera(camera: dict) -> None:
     """Reject native ScanNet++ scenes this experiment's pinhole model cannot use."""
     if camera.get("camera_model") != "PINHOLE":
@@ -257,20 +261,26 @@ class ScanNetPPDataset(Dataset[NvsEpisode]):
                 temporary.unlink(missing_ok=True)
 
     def _load_native_depth(self, frame: dict) -> torch.Tensor:
-        path = self._native_depth_path(frame)
         name = self._frame_name(frame)
+        path_label = name
         with self._failed_depth_names_lock:
             if name in self._failed_depth_names:
-                raise CorruptDepthMapError(f"Previously failed depth map: {path}")
+                raise CorruptDepthMapError(f"Previously failed depth map: {name}")
         try:
+            path = self._native_depth_path(frame)
+            path_label = str(path)
             with Image.open(path) as image:
                 return torch.from_numpy(np.asarray(image).copy()).float()
+        except FileNotFoundError as error:
+            with self._failed_depth_names_lock:
+                self._failed_depth_names.add(name)
+            raise MissingDepthMapError(f"Missing depth map: {name}") from error
         except OSError as error:
             if not isinstance(error, UnidentifiedImageError) and error.errno is not None:
                 raise
             with self._failed_depth_names_lock:
                 self._failed_depth_names.add(name)
-            raise CorruptDepthMapError(f"Cannot decode depth map: {path}") from error
+            raise CorruptDepthMapError(f"Cannot decode depth map: {path_label}") from error
 
     def _indices_include_failed_depth(self, indices: list[int]) -> bool:
         with self._failed_depth_names_lock:

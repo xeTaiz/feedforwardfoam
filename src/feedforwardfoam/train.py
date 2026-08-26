@@ -18,7 +18,11 @@ from .backbone import FrozenGeometryStub, FrozenVGGTOmega
 from .data.blender import BlenderNvsDataset
 from .data.multiscene import MultiSceneScanNetPP
 from .data.types import NvsEpisode
-from .data.scannetpp import CorruptDepthMapError, ScanNetPPDataset
+from .data.scannetpp import (
+    CorruptDepthMapError,
+    MissingDepthMapError,
+    ScanNetPPDataset,
+)
 from .fusion import (
     InvalidDepthGaugeError,
     align_depths_to_calibrated_cameras,
@@ -1040,7 +1044,7 @@ def train(
                             resample,
                             fixed_episode,
                         )
-                except CorruptDepthMapError as error:
+                except (CorruptDepthMapError, MissingDepthMapError) as error:
                     if not isinstance(train_dataset, MultiSceneScanNetPP) or not resample:
                         raise
                     rejected_corrupt_depth_episodes += 1

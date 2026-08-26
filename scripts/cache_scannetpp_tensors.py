@@ -14,7 +14,11 @@ import torch
 import yaml
 
 from feedforwardfoam.data.multiscene import MultiSceneScanNetPP
-from feedforwardfoam.data.scannetpp import CorruptDepthMapError, ScanNetPPDataset
+from feedforwardfoam.data.scannetpp import (
+    CorruptDepthMapError,
+    MissingDepthMapError,
+    ScanNetPPDataset,
+)
 from feedforwardfoam.train import _build_datasets
 
 
@@ -68,6 +72,8 @@ def _materialize(task: CacheTask) -> tuple[str, str | None]:
         task.dataset._load_view(task.frame)
     except CorruptDepthMapError as error:
         return "corrupt", str(error)
+    except MissingDepthMapError as error:
+        return "missing", str(error)
     if not task.path.is_file():
         raise RuntimeError(f"Tensor cache was not written: {task.path}")
     return "written", None
@@ -80,7 +86,7 @@ def materialize(
         raise ValueError("workers must be positive")
     if progress_every <= 0:
         raise ValueError("progress_every must be positive")
-    counts = {"cached": 0, "written": 0, "corrupt": 0}
+    counts = {"cached": 0, "written": 0, "corrupt": 0, "missing": 0}
     corrupt: list[str] = []
     pending_tasks = iter(tasks)
     futures: dict[Future[tuple[str, str | None]], CacheTask] = {}

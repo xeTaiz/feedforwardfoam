@@ -9,7 +9,11 @@ from PIL import Image
 
 import feedforwardfoam.data.scannetpp as scannetpp_module
 from feedforwardfoam.data.multiscene import MultiSceneScanNetPP
-from feedforwardfoam.data.scannetpp import CorruptDepthMapError, ScanNetPPDataset
+from feedforwardfoam.data.scannetpp import (
+    CorruptDepthMapError,
+    MissingDepthMapError,
+    ScanNetPPDataset,
+)
 from scripts.render_scannetpp_depths import (
     _is_valid_depth_image,
     _mesh_in_nerfstudio_coordinates,
@@ -193,8 +197,10 @@ def test_depth_loader_surfaces_filesystem_errors(tmp_path, monkeypatch):
     missing = tmp_path / "missing.png"
     monkeypatch.setattr(dataset, "_native_depth_path", lambda _frame: missing)
 
-    with pytest.raises(FileNotFoundError):
+    with pytest.raises(MissingDepthMapError, match="Missing depth map"):
         dataset._load_native_depth(dataset.frames[0])
+
+    assert all(0 not in dataset._sample_nonfailed_indices(dataset.generator) for _ in range(20))
 
 
 def test_native_scannetpp_fov_uses_camera_units_for_scaled_images(tmp_path):
