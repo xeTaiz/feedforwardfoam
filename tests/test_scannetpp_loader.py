@@ -9,7 +9,7 @@ from PIL import Image
 
 import feedforwardfoam.data.scannetpp as scannetpp_module
 from feedforwardfoam.data.multiscene import MultiSceneScanNetPP
-from feedforwardfoam.data.scannetpp import ScanNetPPDataset
+from feedforwardfoam.data.scannetpp import CorruptDepthMapError, ScanNetPPDataset
 from scripts.render_scannetpp_depths import (
     _is_valid_depth_image,
     _mesh_in_nerfstudio_coordinates,
@@ -151,6 +151,50 @@ def test_tensor_cache_storage_error_disables_writes_without_breaking_load(tmp_pa
         assert scannetpp_module._TENSOR_CACHE_WRITES_DISABLED.is_set()
     finally:
         scannetpp_module._TENSOR_CACHE_WRITES_DISABLED.clear()
+
+
+def test_corrupt_depth_is_classified_once_and_excluded_from_sampling(tmp_path):
+    scene = _write_native_scene(tmp_path, "corrupt-depth")
+    depth_root = scene / "dslr" / "resized_undistorted_depths"
+    depth_root.mkdir()
+    for index in range(12):
+        Image.fromarray(np.ones((6, 10), dtype=np.uint16)).save(
+            depth_root / f"frame_{index:03d}.png"
+        )
+    (depth_root / "frame_000.png").write_bytes(b"not a png")
+    dataset = ScanNetPPDataset(
+        scene,
+        split="train",
+        context_views=1,
+        target_views=1,
+        image_resolution=8,
+        load_depth=True,
+        seed=3,
+    )
+
+    with pytest.raises(CorruptDepthMapError, match="Cannot decode depth map"):
+        dataset.episode_from_indices([0, 1])
+    with pytest.raises(CorruptDepthMapError, match="Previously failed depth map"):
+        dataset.episode_from_indices([0, 1])
+
+    assert all(0 not in dataset._sample_nonfailed_indices(dataset.generator) for _ in range(20))
+
+
+def test_depth_loader_surfaces_filesystem_errors(tmp_path, monkeypatch):
+    scene = _write_native_scene(tmp_path, "missing-depth")
+    dataset = ScanNetPPDataset(
+        scene,
+        split="train",
+        context_views=1,
+        target_views=1,
+        image_resolution=8,
+        load_depth=True,
+    )
+    missing = tmp_path / "missing.png"
+    monkeypatch.setattr(dataset, "_native_depth_path", lambda _frame: missing)
+
+    with pytest.raises(FileNotFoundError):
+        dataset._load_native_depth(dataset.frames[0])
 
 
 def test_native_scannetpp_fov_uses_camera_units_for_scaled_images(tmp_path):

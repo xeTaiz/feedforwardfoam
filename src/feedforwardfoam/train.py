@@ -18,7 +18,7 @@ from .backbone import FrozenGeometryStub, FrozenVGGTOmega
 from .data.blender import BlenderNvsDataset
 from .data.multiscene import MultiSceneScanNetPP
 from .data.types import NvsEpisode
-from .data.scannetpp import ScanNetPPDataset
+from .data.scannetpp import CorruptDepthMapError, ScanNetPPDataset
 from .fusion import (
     InvalidDepthGaugeError,
     align_depths_to_calibrated_cameras,
@@ -1022,18 +1022,31 @@ def train(
         )
         rejected_depth_gauge_episodes = 0
         rejected_empty_support_episodes = 0
+        rejected_corrupt_depth_episodes = 0
         for batch_index in range(scene_batch_size):
             while True:
-                rejected_episodes = rejected_depth_gauge_episodes + rejected_empty_support_episodes
+                rejected_episodes = (
+                    rejected_depth_gauge_episodes
+                    + rejected_empty_support_episodes
+                    + rejected_corrupt_depth_episodes
+                )
                 try:
-                    episode = next(episodes)
-                except StopIteration:
-                    episode = _sample_episode(
-                        train_dataset,
-                        start_index + scene_batch_size + rejected_episodes,
-                        resample,
-                        fixed_episode,
-                    )
+                    try:
+                        episode = next(episodes)
+                    except StopIteration:
+                        episode = _sample_episode(
+                            train_dataset,
+                            start_index + scene_batch_size + rejected_episodes,
+                            resample,
+                            fixed_episode,
+                        )
+                except CorruptDepthMapError as error:
+                    if not isinstance(train_dataset, MultiSceneScanNetPP) or not resample:
+                        raise
+                    rejected_corrupt_depth_episodes += 1
+                    if rejected_episodes + 1 > scene_batch_size:
+                        raise RuntimeError("Too many sampled episodes are invalid") from error
+                    continue
                 try:
                     episode_stats, outputs = _training_episode(
                         head=head,
@@ -1081,6 +1094,7 @@ def train(
                 "supervised_target_views": sum(stats["target_views"] for stats in batch_stats),
                 "rejected_depth_gauge_episodes": float(rejected_depth_gauge_episodes),
                 "rejected_empty_support_episodes": float(rejected_empty_support_episodes),
+                "rejected_corrupt_depth_episodes": float(rejected_corrupt_depth_episodes),
             }
         )
         if val_records and step % int(train_cfg["validate_every"]) == 0:

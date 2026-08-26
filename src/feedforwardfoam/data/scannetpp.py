@@ -14,13 +14,17 @@ from typing import Any
 import numpy as np
 import torch
 import torch.nn.functional as F
-from PIL import Image
+from PIL import Image, UnidentifiedImageError
 from torch.utils.data import Dataset
 
 
 from .types import NvsEpisode, View
 
 _TENSOR_CACHE_WRITES_DISABLED = threading.Event()
+
+
+class CorruptDepthMapError(RuntimeError):
+    """A persistent depth PNG cannot be decoded and must not be sampled again."""
 
 
 def validate_native_camera(camera: dict) -> None:
@@ -85,6 +89,8 @@ class ScanNetPPDataset(Dataset[NvsEpisode]):
         self.context_overlap_threshold = context_overlap_threshold
         self.target_overlap_threshold = target_overlap_threshold
         self.generator = torch.Generator().manual_seed(seed)
+        self._failed_depth_names: set[str] = set()
+        self._failed_depth_names_lock = threading.Lock()
         manifest_path = self.scene_root / "fffoam_views.json"
         if manifest_path.exists():
             self.manifest = json.loads(manifest_path.read_text())
@@ -250,6 +256,34 @@ class ScanNetPPDataset(Dataset[NvsEpisode]):
             if temporary is not None:
                 temporary.unlink(missing_ok=True)
 
+    def _load_native_depth(self, frame: dict) -> torch.Tensor:
+        path = self._native_depth_path(frame)
+        name = self._frame_name(frame)
+        with self._failed_depth_names_lock:
+            if name in self._failed_depth_names:
+                raise CorruptDepthMapError(f"Previously failed depth map: {path}")
+        try:
+            with Image.open(path) as image:
+                return torch.from_numpy(np.asarray(image).copy()).float()
+        except OSError as error:
+            if not isinstance(error, UnidentifiedImageError) and error.errno is not None:
+                raise
+            with self._failed_depth_names_lock:
+                self._failed_depth_names.add(name)
+            raise CorruptDepthMapError(f"Cannot decode depth map: {path}") from error
+
+    def _indices_include_failed_depth(self, indices: list[int]) -> bool:
+        with self._failed_depth_names_lock:
+            failed = self._failed_depth_names.copy()
+        return any(self._frame_name(self.frames[index]) in failed for index in indices)
+
+    def _sample_nonfailed_indices(self, generator: torch.Generator) -> list[int]:
+        for _ in range(1000):
+            indices = self._sample_indices(generator)
+            if not self._indices_include_failed_depth(indices):
+                return indices
+        raise RuntimeError("Unable to sample an episode without a failed depth map")
+
     def _load_view(self, frame: dict) -> View:
         depth = None
         cached = False
@@ -278,9 +312,7 @@ class ScanNetPPDataset(Dataset[NvsEpisode]):
                 left = (image_width - crop_size) // 2
                 rgb = rgb[top : top + crop_size, left : left + crop_size]
                 if self.load_depth:
-                    depth = torch.from_numpy(
-                        np.asarray(Image.open(self._native_depth_path(frame))).copy()
-                    ).float()
+                    depth = self._load_native_depth(frame)
                     depth_height, depth_width = depth.shape[:2]
                     if abs(depth_width / depth_height - camera_width / camera_height) > 1e-3:
                         raise ValueError(
@@ -405,7 +437,7 @@ class ScanNetPPDataset(Dataset[NvsEpisode]):
         return [*contexts, *targets]
 
     def sample_episode(self) -> NvsEpisode:
-        return self.episode_from_indices(self._sample_indices(self.generator))
+        return self.episode_from_indices(self._sample_nonfailed_indices(self.generator))
 
     def _frame_name(self, frame: dict) -> str:
         if self.native:

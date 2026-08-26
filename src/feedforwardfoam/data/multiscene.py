@@ -134,18 +134,21 @@ class MultiSceneScanNetPP:
 
     def sample_episode_request(self) -> EpisodeRequest:
         """Select one episode without loading its image tensors."""
-        if self.episode_entries is not None:
-            index = int(torch.randint(len(self.episode_entries), (), generator=self.generator))
-            entry = self.episode_entries[index]
-            dataset = self._dataset_for(str(entry["scene_id"]))
-            indices = dataset._indices_from_names(
-                list(entry["context_names"]), list(entry["target_names"])
-            )
-        else:
-            index = int(torch.randint(len(self.datasets), (), generator=self.generator))
-            dataset = self.datasets[index]
-            indices = dataset._sample_indices(dataset.generator)
-        return EpisodeRequest(dataset=dataset, indices=tuple(indices))
+        for _ in range(1000):
+            if self.episode_entries is not None:
+                index = int(torch.randint(len(self.episode_entries), (), generator=self.generator))
+                entry = self.episode_entries[index]
+                dataset = self._dataset_for(str(entry["scene_id"]))
+                indices = dataset._indices_from_names(
+                    list(entry["context_names"]), list(entry["target_names"])
+                )
+            else:
+                index = int(torch.randint(len(self.datasets), (), generator=self.generator))
+                dataset = self.datasets[index]
+                indices = dataset._sample_nonfailed_indices(dataset.generator)
+            if not dataset._indices_include_failed_depth(indices):
+                return EpisodeRequest(dataset=dataset, indices=tuple(indices))
+        raise RuntimeError("Unable to select an episode without a failed depth map")
 
     @staticmethod
     def load_episode_request(request: EpisodeRequest) -> NvsEpisode:
