@@ -135,10 +135,12 @@ class PowerFoamRendererBridge:
         wp.init()
         self.args = args
         self._aabb_tree_cls = AABBTree
-        self._sv_cls = SphericalVoronoi
         self._scene_cls = PowerfoamScene
-        self._rasterizer_cls = Rasterizer
         self.reference_camera = reference_camera
+        device = reference_camera.eye.device
+        self._rasterizer = Rasterizer(args, device, attr_dtype="float")
+        self._sv = SphericalVoronoi(args, device, attr_dtype="float")
+        self._sv.fov_cos_cutoff = SphericalVoronoi.compute_fov_cos_cutoff(reference_camera)
 
     def build(self, parameters: FoamParameters):
         scene = self._scene_cls(self.args)
@@ -148,14 +150,8 @@ class PowerFoamRendererBridge:
             object.__setattr__(scene, name, tensor)
         object.__setattr__(scene, "aabb_tree", self._aabb_tree_cls(parameters.points.device))
         scene.rebuild_adjacency()
-        object.__setattr__(
-            scene,
-            "rasterizer",
-            self._rasterizer_cls(self.args, parameters.points.device, attr_dtype="float"),
-        )
-        sv = self._sv_cls(self.args, parameters.points.device, attr_dtype="float")
-        sv.fov_cos_cutoff = self._sv_cls.compute_fov_cos_cutoff(self.reference_camera)
-        object.__setattr__(scene, "sv", sv)
+        object.__setattr__(scene, "rasterizer", self._rasterizer)
+        object.__setattr__(scene, "sv", self._sv)
         return scene
 
     @staticmethod

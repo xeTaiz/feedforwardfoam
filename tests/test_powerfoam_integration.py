@@ -34,14 +34,14 @@ def test_frozen_features_to_powerfoam_to_image_loss_backpropagates():
     head = CanonicalPowerFoamHead(register_dim=16, hidden_dim=32, max_cells=32).to(device)
     params = head(images, features, camera._build_pinhole_ray_maps())
     bridge = PowerFoamRendererBridge(powerfoam_args(), camera)
-    rendered = bridge.render_many(
-        params,
-        [camera_from_view(view, device) for view in (target, second_target)],
-    )
+    cameras = [camera_from_view(view, device) for view in (target, second_target)]
+    rendered = bridge.render_many(params, cameras)
+    rendered_again = bridge.render_many(params, cameras)
     assert all(output.rgb.shape == target.image.shape for output in rendered)
     loss = sum(
         (output.rgb - view.image.to(device)).square().mean()
-        for output, view in zip(rendered, (target, second_target), strict=True)
+        for outputs in (rendered, rendered_again)
+        for output, view in zip(outputs, (target, second_target), strict=True)
     )
     loss.backward()
     assert any(
