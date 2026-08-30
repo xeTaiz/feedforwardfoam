@@ -189,19 +189,22 @@ class TorchCamera:
     fov_cos_cutoff: float = None
 
     def to_warp(self):
+        cached = getattr(self, "_warp_camera", None)
+        if cached is not None:
+            return cached
         warp_cam = WarpCamera()
         warp_cam.eye = wp.vec3f(self.eye[0], self.eye[1], self.eye[2])
         warp_cam.right = wp.vec3f(self.right[0], self.right[1], self.right[2])
         warp_cam.up = wp.vec3f(self.up[0], self.up[1], self.up[2])
         warp_cam.width = self.width
         warp_cam.height = self.height
-        ray_maps = self.ray_maps
-        if ray_maps is None:
-            ray_maps = self._build_pinhole_ray_maps()
-        warp_cam.ray_maps = wp.from_torch(ray_maps, dtype=wp.float32)
+        if self.ray_maps is None:
+            self.ray_maps = self._build_pinhole_ray_maps()
+        warp_cam.ray_maps = wp.from_torch(self.ray_maps, dtype=wp.float32)
         warp_cam.fov_cos_cutoff = (
             self.fov_cos_cutoff if self.fov_cos_cutoff is not None else 0.0
         )
+        self._warp_camera = warp_cam
         return warp_cam
 
     def _build_pinhole_ray_maps(self):

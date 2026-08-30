@@ -311,13 +311,8 @@ class PowerfoamScene(nn.Module):
 
         return axis, rgb, temp
 
-    def forward(
-        self,
-        camera,
-        depth_quantiles=None,
-        ray_gt=None,
-        return_point_err=False,
-    ):
+    def prepare_render(self):
+        """Build view-independent differentiable attributes once per render batch."""
         normals = self.get_normals()
         tangents, bitangent = self.get_tangents()
         radii = self.get_radii()
@@ -326,31 +321,76 @@ class PowerfoamScene(nn.Module):
             offsets[..., 0:1] * tangents[:, None, :]
             + offsets[..., 1:2] * bitangent[:, None, :]
         )
-        texel_sites = self.points[:, None, :] + offsets
+        return {
+            "normals": normals,
+            "radii": radii,
+            "texel_sites": self.points[:, None, :] + offsets,
+            "texel_height": self.texel_height * radii[:, None],
+            "att_sv": self.get_att_sv(),
+        }
 
-        att_sites, att_values, att_temps = self.get_att_sv()
+    def forward_prepared(
+        self,
+        camera,
+        prepared,
+        depth_quantiles=None,
+        ray_gt=None,
+        return_point_err=False,
+        visibility=None,
+    ):
+        att_sites, att_values, att_temps = prepared["att_sv"]
         texel_rgb = self.sv.forward(
-            texel_sites.view(-1, 3).detach(), camera, att_sites, att_values, att_temps
+            prepared["texel_sites"].view(-1, 3).detach(),
+            camera,
+            att_sites,
+            att_values,
+            att_temps,
         )
         texel_rgb = texel_rgb.view(self.points.shape[0], self.args.num_texel_sites, 3)
-
-        texel_height = self.texel_height * radii[:, None]
-
-        return self.rasterizer.forward(
+        args = (
             camera,
             depth_quantiles,
             self.points,
-            self.get_radii(),
+            prepared["radii"],
             self.get_density(),
-            normals,
-            texel_sites,
+            prepared["normals"],
+            prepared["texel_sites"],
             texel_rgb,
-            texel_height,
+            prepared["texel_height"],
             self.adjacency,
             self.adjacency_offsets,
             ray_gt,
             return_point_err,
         )
+        if visibility is None:
+            return self.rasterizer.forward(*args)
+        return self.rasterizer.forward_precomputed(visibility, *args)
+
+    def forward(
+        self,
+        camera,
+        depth_quantiles=None,
+        ray_gt=None,
+        return_point_err=False,
+    ):
+        return self.forward_prepared(
+            camera,
+            self.prepare_render(),
+            depth_quantiles,
+            ray_gt,
+            return_point_err,
+        )
+
+    def forward_many(self, cameras):
+        """Render one scene from many cameras with one visibility synchronization."""
+        prepared = self.prepare_render()
+        visibility = self.rasterizer.prepare_visibility_many(
+            cameras, self.points, prepared["radii"]
+        )
+        return [
+            self.forward_prepared(camera, prepared, visibility=visible)
+            for camera, visible in zip(cameras, visibility, strict=True)
+        ]
 
     def update_vis_cache(self):
         """Recompute view-independent attributes and store them in the vis cache.

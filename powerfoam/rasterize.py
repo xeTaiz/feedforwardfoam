@@ -34,6 +34,19 @@ class RasterGradFn(torch.autograd.Function):
         return ctx.rasterizer._backward(ctx, *args)
 
 
+
+class RasterPreparedGradFn(torch.autograd.Function):
+    """Raster autograd wrapper using visibility counts prepared for a camera batch."""
+
+    @staticmethod
+    def forward(ctx, rasterizer, visibility, *args):
+        return rasterizer._forward(ctx, *args, visibility=visibility)
+
+    @staticmethod
+    def backward(ctx, *args):
+        gradients = ctx.rasterizer._backward(ctx, *args)
+        return gradients[0], None, *gradients[1:]
+
 class Rasterizer:
     def __init__(self, args, device, attr_dtype="float"):
         self.device = device
@@ -1584,6 +1597,77 @@ class Rasterizer:
 
         return cones, level_offsets, level_dims_h, level_dims_w, num_levels, tile_level
 
+    def _prepare_visibility(self, camera, all_spheres):
+        num_points = all_spheres.shape[0]
+        tiles_h = 1 + (camera.height - 1) // TILE_WIDTH
+        tiles_w = 1 + (camera.width - 1) // TILE_WIDTH
+        total_tiles = tiles_h * tiles_w
+        tile_inter_counts = torch.zeros(
+            total_tiles + 1, dtype=torch.int32, device=self.device
+        )
+        preparation = {
+            "cones": None,
+            "level_offsets": None,
+            "level_dims_h": None,
+            "level_dims_w": None,
+            "num_levels": None,
+            "tile_level": None,
+        }
+        if self.args.is_pinhole:
+            wp.launch(
+                self.count_visible_kernel,
+                dim=num_points,
+                inputs=[camera.to_warp(), all_spheres, tile_inter_counts],
+                block_dim=256,
+            )
+        else:
+            cones, level_offsets, level_dims_h, level_dims_w, num_levels, tile_level = (
+                self._precompute_cones(camera, tiles_h, tiles_w)
+            )
+            preparation.update(
+                {
+                    "cones": cones,
+                    "level_offsets": level_offsets,
+                    "level_dims_h": level_dims_h,
+                    "level_dims_w": level_dims_w,
+                    "num_levels": num_levels,
+                    "tile_level": tile_level,
+                }
+            )
+            wp.launch(
+                self.count_visible_kernel,
+                dim=num_points,
+                inputs=[
+                    camera.to_warp(),
+                    all_spheres,
+                    cones,
+                    level_offsets,
+                    level_dims_h,
+                    level_dims_w,
+                    num_levels,
+                    tile_level,
+                    tile_inter_counts,
+                ],
+                block_dim=256,
+            )
+        preparation["offsets"] = torch.cumsum(tile_inter_counts.long(), dim=0)
+        return preparation
+
+    def prepare_visibility_many(self, cameras, points, radii):
+        """Queue visibility counts for every camera, then synchronize once."""
+        with wp.ScopedDevice(str(self.device)):
+            torch_stream = torch.cuda.current_stream()
+            wp.set_stream(wp.stream_from_torch(torch_stream))
+            all_spheres = torch.cat([points.detach(), radii.detach()[:, None]], dim=-1)
+            preparations = [
+                self._prepare_visibility(camera, all_spheres) for camera in cameras
+            ]
+            counts = torch.stack(
+                [preparation["offsets"][-1] for preparation in preparations]
+            ).cpu().tolist()
+        for preparation, count in zip(preparations, counts, strict=True):
+            preparation["n_intersections"] = int(count)
+        return preparations
     def _forward(
         self,
         grad_ctx,
@@ -1601,6 +1685,8 @@ class Rasterizer:
         ray_gt,
         return_point_err,
         transmittance_threshold=1e-3,
+        *,
+        visibility=None,
     ):
         with wp.ScopedDevice(str(self.device)):
             torch_stream = torch.cuda.current_stream()
@@ -1674,44 +1760,17 @@ class Rasterizer:
             else:
                 err_out = None
 
-            tile_inter_counts = torch.zeros(
-                total_tiles + 1, dtype=torch.int32, device=self.device
-            )
-
-            if self.args.is_pinhole:
-                wp.launch(
-                    self.count_visible_kernel,
-                    dim=num_points,
-                    inputs=[
-                        camera.to_warp(),
-                        all_spheres.detach(),
-                        tile_inter_counts,
-                    ],
-                    block_dim=256,
-                )
-            else:
-                cones, level_offsets, level_dims_h, level_dims_w, num_levels, tile_level = (
-                    self._precompute_cones(camera, tiles_h, tiles_w)
-                )
-                wp.launch(
-                    self.count_visible_kernel,
-                    dim=num_points,
-                    inputs=[
-                        camera.to_warp(),
-                        all_spheres.detach(),
-                        cones,
-                        level_offsets,
-                        level_dims_h,
-                        level_dims_w,
-                        num_levels,
-                        tile_level,
-                        tile_inter_counts,
-                    ],
-                    block_dim=256,
-                )
-
-            offsets = torch.cumsum(tile_inter_counts.long(), dim=0)
-            n_intersections = offsets[-1].item()
+            if visibility is None:
+                visibility = self._prepare_visibility(camera, all_spheres.detach())
+                visibility["n_intersections"] = int(visibility["offsets"][-1].item())
+            offsets = visibility["offsets"]
+            n_intersections = visibility["n_intersections"]
+            cones = visibility["cones"]
+            level_offsets = visibility["level_offsets"]
+            level_dims_h = visibility["level_dims_h"]
+            level_dims_w = visibility["level_dims_w"]
+            num_levels = visibility["num_levels"]
+            tile_level = visibility["tile_level"]
 
             tile_prim_indices = torch.zeros(
                 n_intersections, dtype=torch.int32, device=self.device
@@ -1857,6 +1916,9 @@ class Rasterizer:
 
     def forward(self, *args):
         return RasterGradFn.apply(self, *args)
+
+    def forward_precomputed(self, visibility, *args):
+        return RasterPreparedGradFn.apply(self, visibility, *args)
 
     def _backward(
         self,

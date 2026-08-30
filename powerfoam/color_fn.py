@@ -206,11 +206,11 @@ class SphericalVoronoi:
                 camera_forward, dim=-1, keepdim=True
             )
 
-            # Compute FOV cutoff from the actual camera's frustum diagonal
-            right_norm = float(torch.linalg.norm(camera.right).item())
-            up_norm = float(torch.linalg.norm(camera.up).item())
-            tan_diag = math.sqrt(right_norm**2 + up_norm**2)
-            fov_cos_cutoff = math.cos(math.atan(tan_diag) + _FOV_BUFFER_RAD)
+            if fov_cos_cutoff is None:
+                right_norm = float(torch.linalg.norm(camera.right).item())
+                up_norm = float(torch.linalg.norm(camera.up).item())
+                tan_diag = math.sqrt(right_norm**2 + up_norm**2)
+                fov_cos_cutoff = math.cos(math.atan(tan_diag) + _FOV_BUFFER_RAD)
 
             wp.launch(
                 kernel=self.spherical_voronoi_fwd_kernel,
