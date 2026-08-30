@@ -3,7 +3,8 @@
 	url = https://github.com/facebookresearch/vggt-omega.git
 [submodule "external/powerfoam"]
 	path = external/powerfoam
-	url = https://github.com/theialab/powerfoam.git
+	url = https://github.com/xeTaiz/feedforwardfoam.git
+	branch = vendor/powerfoam
 [submodule "external/references/depth-anything-3"]
 	path = external/references/depth-anything-3
 	url = https://github.com/ByteDance-Seed/Depth-Anything-3.git
