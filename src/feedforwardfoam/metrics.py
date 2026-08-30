@@ -32,23 +32,37 @@ def masked_lpips(
     prediction: torch.Tensor,
     target: torch.Tensor,
     mask: torch.Tensor | None = None,
+    *,
+    check_nonempty: bool = True,
 ) -> torch.Tensor:
-    """Compute spatial VGG LPIPS, zeroing and averaging as Splatt3R does."""
-    prediction_nchw = prediction.permute(2, 0, 1)[None]
+    """Compute spatial VGG LPIPS for one HWC image or a batch of BHWC images."""
+    single = prediction.ndim == 3
+    if single:
+        prediction = prediction[None]
+        target = target[None]
+        if mask is not None:
+            mask = mask[None]
+    if prediction.ndim != 4 or target.shape != prediction.shape:
+        raise ValueError("LPIPS prediction and target must have matching HWC or BHWC shapes")
+    prediction_nchw = prediction.permute(0, 3, 1, 2)
+    target_nchw = target.permute(0, 3, 1, 2)
     mask_nchw: torch.Tensor | None = None
-    target_nchw = target.permute(2, 0, 1)[None]
     if mask is not None:
-        if not mask.any():
+        if mask.shape != prediction.shape[:3]:
+            raise ValueError("LPIPS mask must match the image batch and spatial dimensions")
+        if check_nonempty and not mask.flatten(1).any(dim=1).all():
             raise ValueError("Cannot compute LPIPS for an empty mask")
-        mask_nchw = mask[None, None].to(prediction.dtype)
+        mask_nchw = mask[:, None].to(prediction.dtype)
         prediction_nchw = prediction_nchw * mask_nchw
         target_nchw = target_nchw * mask_nchw
     score = model(prediction_nchw, target_nchw, normalize=True)
-    if mask is None:
-        return score.mean()
-    assert mask_nchw is not None
+    if mask_nchw is None:
+        return score.flatten(1).mean(dim=1).mean()
     score_mask = F.interpolate(mask_nchw, size=score.shape[-2:], mode="nearest")
-    return (score * score_mask).sum() / score_mask.sum().clamp_min(1)
+    per_image = (score * score_mask).flatten(1).sum(dim=1) / score_mask.flatten(1).sum(
+        dim=1
+    ).clamp_min(1)
+    return per_image.mean()
 
 
 @torch.no_grad()

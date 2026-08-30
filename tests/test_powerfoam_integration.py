@@ -37,10 +37,15 @@ def test_frozen_features_to_powerfoam_to_image_loss_backpropagates():
     cameras = [camera_from_view(view, device) for view in (target, second_target)]
     rendered = bridge.render_many(params, cameras)
     rendered_again = bridge.render_many(params, cameras)
+    serial_scene = bridge.build(params)
+    rendered_serial = [bridge._render_scene(serial_scene, camera) for camera in cameras]
+    for batched, serial in zip(rendered, rendered_serial, strict=True):
+        assert torch.allclose(batched.rgb, serial.rgb, atol=1e-6, rtol=1e-6)
+        assert torch.allclose(batched.alpha, serial.alpha, atol=1e-6, rtol=1e-6)
     assert all(output.rgb.shape == target.image.shape for output in rendered)
     loss = sum(
         (output.rgb - view.image.to(device)).square().mean()
-        for outputs in (rendered, rendered_again)
+        for outputs in (rendered, rendered_again, rendered_serial)
         for output, view in zip(outputs, (target, second_target), strict=True)
     )
     loss.backward()

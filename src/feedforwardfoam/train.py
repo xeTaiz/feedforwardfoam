@@ -58,6 +58,26 @@ def _context_tensor(episode, device: torch.device) -> torch.Tensor:
     return torch.stack([view.image.permute(2, 0, 1) for view in episode.context])[None].to(device)
 
 
+def _batched_backbone_features(
+    backbone,
+    episodes: list[NvsEpisode],
+    device: torch.device,
+) -> list[dict[str, torch.Tensor]]:
+    """Run the frozen backbone once for equally shaped scene contexts."""
+    if not episodes:
+        return []
+    images = torch.cat([_context_tensor(episode, device) for episode in episodes])
+    with torch.no_grad():
+        batched = backbone(images)
+    # FrozenVGGTOmega uses inference mode internally. Clone once into ordinary
+    # no-grad storage before trainable projection layers consume these tensors.
+    batched = {name: value.clone() for name, value in batched.items()}
+    return [
+        {name: value[index : index + 1] for name, value in batched.items()}
+        for index in range(len(episodes))
+    ]
+
+
 def _charbonnier(prediction: torch.Tensor, target: torch.Tensor, eps: float = 1e-3) -> torch.Tensor:
     return torch.sqrt((prediction - target).square() + eps * eps).mean()
 
@@ -71,16 +91,20 @@ def _rgb_loss(prediction: torch.Tensor, target: torch.Tensor, name: str) -> torc
 
 
 def _metrics(
-    rendered: torch.Tensor, target: torch.Tensor, mask: torch.Tensor | None = None
-) -> dict[str, float]:
+    rendered: torch.Tensor,
+    target: torch.Tensor,
+    mask: torch.Tensor | None = None,
+    *,
+    check_nonempty: bool = True,
+) -> dict[str, torch.Tensor]:
     rendered = rendered.clamp(0, 1)
     if mask is not None:
-        if not mask.any():
+        if check_nonempty and not mask.any():
             raise ValueError("Cannot compute support metrics for an empty mask")
         rendered = rendered[mask]
         target = target[mask]
-    mse = F.mse_loss(rendered, target).item()
-    return {"mse": mse, "psnr": -10.0 * torch.log10(torch.tensor(mse + 1e-10)).item()}
+    mse = F.mse_loss(rendered, target)
+    return {"mse": mse, "psnr": -10.0 * torch.log10(mse + 1e-10)}
 
 
 def _build_datasets(config: dict[str, Any], data_root: Path):
@@ -306,42 +330,49 @@ def _episode_objective(
     lpips_model: SpatialLPIPS | None = None,
     splatt3r_masked_reduction: bool = False,
 ):
-    rgb_losses = []
-    perceptual_losses = []
-    alpha_losses = []
-    for index, (output, target_view) in enumerate(zip(outputs, target_views, strict=True)):
-        target = target_view.image.to(device)
-        mask = masks[index].to(device) if masks is not None else None
-        if mask is None:
-            rgb_losses.append(_rgb_loss(output.rgb, target, rgb_loss_name))
-        elif mask.any():
-            rgb_loss = _rgb_loss(output.rgb[mask], target[mask], rgb_loss_name)
-            if splatt3r_masked_reduction:
-                if rgb_loss_name != "mse":
-                    raise ValueError("Splatt3R masked reduction is defined only for MSE")
-                rgb_loss = 3.0 * rgb_loss
-            rgb_losses.append(rgb_loss)
-        else:
-            raise EmptySupportMaskError(
-                "Masked benchmark supervision cannot use an empty support mask"
-            )
-        if lpips_weight > 0:
-            if lpips_model is None:
-                raise ValueError("lpips_weight requires an LPIPS model")
-            perceptual_losses.append(masked_lpips(lpips_model, output.rgb, target, mask))
-        if alpha_weight > 0:
-            if target_view.alpha is None:
-                raise ValueError("alpha_loss_weight requires target alpha")
-            alpha_losses.append(F.l1_loss(output.alpha, target_view.alpha.to(device)))
-    rgb_loss = torch.stack(rgb_losses).mean()
-    perceptual_loss = (
-        torch.stack(perceptual_losses).mean()
-        if perceptual_losses
-        else torch.zeros((), device=device)
-    )
-    alpha_loss = (
-        torch.stack(alpha_losses).mean() if alpha_losses else torch.zeros((), device=device)
-    )
+    predictions = torch.stack([output.rgb for output in outputs])
+    targets = torch.stack([view.image.to(device) for view in target_views])
+    mask_batch = torch.stack([mask.to(device) for mask in masks]) if masks is not None else None
+    if mask_batch is not None and not mask_batch.flatten(1).any(dim=1).all():
+        raise EmptySupportMaskError("Masked benchmark supervision cannot use an empty support mask")
+
+    if rgb_loss_name == "charbonnier":
+        rgb_error = torch.sqrt((predictions - targets).square() + 1e-6)
+    elif rgb_loss_name == "mse":
+        rgb_error = (predictions - targets).square()
+    else:
+        raise ValueError(f"Unknown RGB loss: {rgb_loss_name}")
+    if mask_batch is None:
+        rgb_loss = rgb_error.flatten(1).mean(dim=1).mean()
+    else:
+        per_target_sum = (rgb_error * mask_batch[..., None]).flatten(1).sum(dim=1)
+        per_target_count = 3 * mask_batch.flatten(1).sum(dim=1)
+        rgb_loss = (per_target_sum / per_target_count.clamp_min(1)).mean()
+        if splatt3r_masked_reduction:
+            if rgb_loss_name != "mse":
+                raise ValueError("Splatt3R masked reduction is defined only for MSE")
+            rgb_loss = 3.0 * rgb_loss
+
+    if lpips_weight > 0:
+        if lpips_model is None:
+            raise ValueError("lpips_weight requires an LPIPS model")
+        perceptual_loss = masked_lpips(
+            lpips_model,
+            predictions,
+            targets,
+            mask_batch,
+            check_nonempty=False,
+        )
+    else:
+        perceptual_loss = torch.zeros((), device=device)
+    if alpha_weight > 0:
+        if any(target_view.alpha is None for target_view in target_views):
+            raise ValueError("alpha_loss_weight requires target alpha")
+        target_alpha = torch.stack([target_view.alpha.to(device) for target_view in target_views])
+        output_alpha = torch.stack([output.alpha for output in outputs])
+        alpha_loss = F.l1_loss(output_alpha, target_alpha)
+    else:
+        alpha_loss = torch.zeros((), device=device)
     loss = rgb_loss + lpips_weight * perceptual_loss + alpha_weight * alpha_loss
     return loss, rgb_loss, perceptual_loss, alpha_loss
 
@@ -375,13 +406,18 @@ def _proposal_confidence(
     return flat[uniform_selection_indices(flat.shape[0], budget, flat.device)]
 
 
-def _predict(head, backbone, episode, representation: str, device: torch.device):
+def _predict(
+    head,
+    backbone,
+    episode,
+    representation: str,
+    device: torch.device,
+    frozen_features: dict[str, torch.Tensor] | None = None,
+):
     images = _context_tensor(episode, device)
-    with torch.no_grad():
-        features = backbone(images)
-    # FrozenVGGTOmega uses inference mode internally. Clone its outputs into
-    # ordinary no-grad tensors before feeding trainable projection layers.
-    features = {name: value.clone() for name, value in features.items()}
+    if frozen_features is None:
+        frozen_features = _batched_backbone_features(backbone, [episode], device)[0]
+    features = frozen_features
     aligned_depths, alignment = align_depths_to_calibrated_cameras(features, episode.context)
     features["depth"] = aligned_depths
     features["depth_alignment_scale"] = alignment.scale[None]
@@ -394,9 +430,8 @@ def _predict(head, backbone, episode, representation: str, device: torch.device)
     if representation != "foam" or proposal_views == "canonical":
         ray_map = pinhole_ray_map_from_view(episode.context[0], device)
         support = build_canonical_support(images, features, episode.context, device)
-        features["canonical_support_fraction"] = torch.tensor(
-            float(support.maps[:, -1].mean()) if support is not None else 0.0,
-            device=device,
+        features["canonical_support_fraction"] = (
+            support.maps[:, -1].mean() if support is not None else torch.zeros((), device=device)
         )[None]
         if representation == "foam":
             canonical_points = world_points_from_z_depth(
@@ -452,7 +487,9 @@ def _predict(head, backbone, episode, representation: str, device: torch.device)
         support = build_canonical_support(
             ordered_images, ordered_features, ordered_contexts, device
         )
-        support_fractions.append(float(support.maps[:, -1].mean()) if support is not None else 0.0)
+        support_fractions.append(
+            support.maps[:, -1].mean() if support is not None else torch.zeros((), device=device)
+        )
         ray_map = pinhole_ray_map_from_view(ordered_contexts[0], device)
         canonical_points = world_points_from_z_depth(
             ordered_contexts[0], ordered_features["depth"][:, 0], device
@@ -498,8 +535,6 @@ def _predict(head, backbone, episode, representation: str, device: torch.device)
             head._proposal_index_cache[cache_key] = indices
         params = select_foam_parameters(params, indices.to(params.points.device))
     if reduction == "incremental":
-        # Radii change during training, so the surviving set is recomputed each
-        # step rather than cached like the fixed-budget reductions.
         indices = incremental_containment_indices(
             params.points,
             params.radii,
@@ -508,9 +543,7 @@ def _predict(head, backbone, episode, representation: str, device: torch.device)
             tolerance=head.proposal_containment_tolerance,
         )
         params = select_foam_parameters(params, indices)
-    features["canonical_support_fraction"] = torch.tensor(
-        sum(support_fractions) / len(support_fractions), device=device
-    )[None]
+    features["canonical_support_fraction"] = torch.stack(support_fractions).mean()[None]
     return params, features
 
 
@@ -676,7 +709,6 @@ def _validation(
 
 
 def _training_episode(
-    *,
     head,
     backbone,
     bridge,
@@ -686,8 +718,16 @@ def _training_episode(
     train_cfg: dict[str, Any],
     lpips_model: SpatialLPIPS | None,
     loss_scale: float,
+    frozen_features: dict[str, torch.Tensor] | None = None,
 ):
-    params, features = _predict(head, backbone, episode, representation, device)
+    params, features = _predict(
+        head,
+        backbone,
+        episode,
+        representation,
+        device,
+        frozen_features=frozen_features,
+    )
     target_views = (
         episode.context if bool(train_cfg.get("target_from_context", False)) else episode.target
     )
@@ -737,40 +777,50 @@ def _training_episode(
         _metrics(output.rgb.detach(), view.image.to(device))
         for output, view in zip(outputs, target_views, strict=True)
     ]
+    support_nonempty = support_masks is not None and (
+        use_mask or bool(torch.stack(support_masks).flatten(1).any(dim=1).all())
+    )
     support_per_target = (
         [
-            _metrics(output.rgb.detach(), view.image.to(device), mask)
+            _metrics(
+                output.rgb.detach(),
+                view.image.to(device),
+                mask,
+                check_nonempty=False,
+            )
             for output, view, mask in zip(outputs, target_views, support_masks, strict=True)
         ]
-        if support_masks is not None and all(mask.any() for mask in support_masks)
+        if support_nonempty
         else None
     )
     stats = {
-        "loss": float(loss.detach()),
-        "rgb_loss": float(rgb_loss.detach()),
-        "lpips_loss": float(perceptual_loss.detach()),
-        "alpha_loss": float(alpha_loss.detach()),
-        "target_views": float(len(target_views)),
-        "train_psnr": sum(metric["psnr"] for metric in per_target) / len(per_target),
-        "train_mse": sum(metric["mse"] for metric in per_target) / len(per_target),
-        "render_alpha_mean": sum(float(output.alpha.detach().mean()) for output in outputs)
-        / len(outputs),
-        "active_cells": float(
-            params.points.shape[0] if representation == "foam" else params.means.shape[0]
+        "loss": loss.detach(),
+        "rgb_loss": rgb_loss.detach(),
+        "lpips_loss": perceptual_loss.detach(),
+        "alpha_loss": alpha_loss.detach(),
+        "target_views": torch.tensor(float(len(target_views)), device=device),
+        "train_psnr": torch.stack([metric["psnr"] for metric in per_target]).mean(),
+        "train_mse": torch.stack([metric["mse"] for metric in per_target]).mean(),
+        "render_alpha_mean": torch.stack(
+            [output.alpha.detach().mean() for output in outputs]
+        ).mean(),
+        "active_cells": torch.tensor(
+            float(params.points.shape[0] if representation == "foam" else params.means.shape[0]),
+            device=device,
         ),
-        "mean_radius": float(
+        "mean_radius": (
             F.softplus(params.radii.detach(), beta=100).mean()
             if representation == "foam"
             else params.scales.detach().mean()
         ),
-        "depth_alignment_scale": float(features["depth_alignment_scale"].mean()),
-        "depth_alignment_raw_scale": float(features["depth_alignment_raw_scale"].mean()),
-        "depth_alignment_bound_hit": float(features["depth_alignment_bound_hit"].mean()),
-        "canonical_support_fraction": float(features["canonical_support_fraction"].mean()),
-        "visibility_mask_fraction": float(
+        "depth_alignment_scale": features["depth_alignment_scale"].mean(),
+        "depth_alignment_raw_scale": features["depth_alignment_raw_scale"].mean(),
+        "depth_alignment_bound_hit": features["depth_alignment_bound_hit"].mean(),
+        "canonical_support_fraction": features["canonical_support_fraction"].mean(),
+        "visibility_mask_fraction": (
             torch.stack([mask.float().mean() for mask in support_masks]).mean()
             if support_masks is not None
-            else 1.0
+            else torch.ones((), device=device)
         ),
     }
     if support_per_target is not None:
@@ -786,16 +836,15 @@ def _training_episode(
         ]
         stats.update(
             {
-                "support_mse": sum(metric["mse"] for metric in support_per_target)
-                / len(support_per_target),
-                "support_psnr": sum(metric["psnr"] for metric in support_per_target)
-                / len(support_per_target),
-                "render_coverage_fraction": sum(
-                    float(alpha_mask.float().mean()) for alpha_mask in alpha_masks
-                )
-                / len(alpha_masks),
-                "support_render_iou": float(torch.stack(intersections).mean())
-                / float(torch.stack(unions).mean().clamp_min(1e-8)),
+                "support_mse": torch.stack([metric["mse"] for metric in support_per_target]).mean(),
+                "support_psnr": torch.stack(
+                    [metric["psnr"] for metric in support_per_target]
+                ).mean(),
+                "render_coverage_fraction": torch.stack(
+                    [alpha_mask.float().mean() for alpha_mask in alpha_masks]
+                ).mean(),
+                "support_render_iou": torch.stack(intersections).mean()
+                / torch.stack(unions).mean().clamp_min(1e-8),
             }
         )
     return stats, outputs
@@ -979,6 +1028,9 @@ def train(
     scene_batch_size = int(train_cfg.get("scene_batch_size", 1))
     if scene_batch_size <= 0:
         raise ValueError("scene_batch_size must be positive")
+    backbone_batch_size = int(train_cfg.get("backbone_batch_size", 1))
+    if backbone_batch_size <= 0:
+        raise ValueError("backbone_batch_size must be positive")
     episode_prefetch_workers = int(train_cfg.get("episode_prefetch_workers", 1))
     if episode_prefetch_workers <= 0:
         raise ValueError("episode_prefetch_workers must be positive")
@@ -1010,7 +1062,7 @@ def train(
     )
     for step in range(start_step, int(train_cfg["steps"]) + 1):
         optimizer.zero_grad(set_to_none=True)
-        batch_stats: list[dict[str, float]] = []
+        batch_stats: list[dict[str, torch.Tensor]] = []
         outputs = None
         episode = None
         start_index = (step - 1) * scene_batch_size
@@ -1027,54 +1079,84 @@ def train(
         rejected_depth_gauge_episodes = 0
         rejected_empty_support_episodes = 0
         rejected_corrupt_depth_episodes = 0
-        for batch_index in range(scene_batch_size):
-            while True:
-                rejected_episodes = (
-                    rejected_depth_gauge_episodes
-                    + rejected_empty_support_episodes
-                    + rejected_corrupt_depth_episodes
-                )
+        loaded_episodes: list[NvsEpisode] = []
+        while len(loaded_episodes) < scene_batch_size:
+            rejected_episodes = (
+                rejected_depth_gauge_episodes
+                + rejected_empty_support_episodes
+                + rejected_corrupt_depth_episodes
+            )
+            try:
                 try:
-                    try:
-                        episode = next(episodes)
-                    except StopIteration:
-                        episode = _sample_episode(
-                            train_dataset,
-                            start_index + scene_batch_size + rejected_episodes,
-                            resample,
-                            fixed_episode,
-                        )
-                except (CorruptDepthMapError, MissingDepthMapError) as error:
-                    if not isinstance(train_dataset, MultiSceneScanNetPP) or not resample:
-                        raise
-                    rejected_corrupt_depth_episodes += 1
-                    if rejected_episodes + 1 > scene_batch_size:
-                        raise RuntimeError("Too many sampled episodes are invalid") from error
-                    continue
-                try:
-                    episode_stats, outputs = _training_episode(
-                        head=head,
-                        backbone=backbone,
-                        bridge=bridge,
-                        episode=episode,
-                        representation=representation,
-                        device=device,
-                        train_cfg=train_cfg,
-                        lpips_model=lpips_model,
-                        loss_scale=1.0 / scene_batch_size,
+                    episode = next(episodes)
+                except StopIteration:
+                    episode = _sample_episode(
+                        train_dataset,
+                        start_index + scene_batch_size + rejected_episodes,
+                        resample,
+                        fixed_episode,
                     )
-                except (InvalidDepthGaugeError, EmptySupportMaskError) as error:
-                    if not isinstance(train_dataset, MultiSceneScanNetPP) or not resample:
-                        raise
-                    if isinstance(error, InvalidDepthGaugeError):
-                        rejected_depth_gauge_episodes += 1
-                    else:
-                        rejected_empty_support_episodes += 1
-                    if rejected_episodes + 1 > scene_batch_size:
-                        raise RuntimeError("Too many sampled episodes are invalid") from error
-                    continue
-                batch_stats.append(episode_stats)
-                break
+            except (CorruptDepthMapError, MissingDepthMapError) as error:
+                if not isinstance(train_dataset, MultiSceneScanNetPP) or not resample:
+                    raise
+                rejected_corrupt_depth_episodes += 1
+                if rejected_episodes + 1 > scene_batch_size:
+                    raise RuntimeError("Too many sampled episodes are invalid") from error
+                continue
+            loaded_episodes.append(episode)
+
+        for offset in range(0, scene_batch_size, backbone_batch_size):
+            episode_group = loaded_episodes[offset : offset + backbone_batch_size]
+            feature_group = _batched_backbone_features(backbone, episode_group, device)
+            for episode, frozen_features in zip(episode_group, feature_group, strict=True):
+                while True:
+                    rejected_episodes = (
+                        rejected_depth_gauge_episodes
+                        + rejected_empty_support_episodes
+                        + rejected_corrupt_depth_episodes
+                    )
+                    try:
+                        episode_stats, outputs = _training_episode(
+                            head=head,
+                            backbone=backbone,
+                            bridge=bridge,
+                            episode=episode,
+                            representation=representation,
+                            device=device,
+                            train_cfg=train_cfg,
+                            lpips_model=lpips_model,
+                            loss_scale=1.0 / scene_batch_size,
+                            frozen_features=frozen_features,
+                        )
+                    except (InvalidDepthGaugeError, EmptySupportMaskError) as error:
+                        if not isinstance(train_dataset, MultiSceneScanNetPP) or not resample:
+                            raise
+                        if isinstance(error, InvalidDepthGaugeError):
+                            rejected_depth_gauge_episodes += 1
+                        else:
+                            rejected_empty_support_episodes += 1
+                        if rejected_episodes + 1 > scene_batch_size:
+                            raise RuntimeError("Too many sampled episodes are invalid") from error
+                        while True:
+                            try:
+                                episode = _sample_episode(
+                                    train_dataset,
+                                    start_index + scene_batch_size + rejected_episodes + 1,
+                                    resample,
+                                    fixed_episode,
+                                )
+                                break
+                            except (CorruptDepthMapError, MissingDepthMapError) as load_error:
+                                rejected_corrupt_depth_episodes += 1
+                                rejected_episodes += 1
+                                if rejected_episodes + 1 > scene_batch_size:
+                                    raise RuntimeError(
+                                        "Too many sampled episodes are invalid"
+                                    ) from load_error
+                        frozen_features = None
+                        continue
+                    batch_stats.append(episode_stats)
+                    break
         grad_norm = _clip_grad_norm_stable(
             head.parameters(),
             float(train_cfg.get("gradient_clip_norm", 1.0)),
@@ -1084,18 +1166,27 @@ def train(
             scheduler.step()
 
         metric_names = set().union(*(stats.keys() for stats in batch_stats))
-        record = {
-            name: sum(stats[name] for stats in batch_stats if name in stats)
-            / sum(name in stats for stats in batch_stats)
+        tensor_record = {
+            name: torch.stack([stats[name] for stats in batch_stats if name in stats]).mean()
             for name in metric_names
         }
+        tensor_record["grad_norm"] = grad_norm
+        tensor_record["supervised_target_views"] = torch.stack(
+            [stats["target_views"] for stats in batch_stats]
+        ).sum()
+        ordered_names = sorted(tensor_record)
+        ordered_values = torch.stack(
+            [
+                tensor_record[name].detach().to(device=device, dtype=torch.float64)
+                for name in ordered_names
+            ]
+        )
+        record = dict(zip(ordered_names, ordered_values.cpu().tolist(), strict=True))
         record.update(
             {
                 "step": float(step),
-                "grad_norm": float(grad_norm),
                 "learning_rate": float(optimizer.param_groups[0]["lr"]),
                 "scene_batch_size": float(scene_batch_size),
-                "supervised_target_views": sum(stats["target_views"] for stats in batch_stats),
                 "rejected_depth_gauge_episodes": float(rejected_depth_gauge_episodes),
                 "rejected_empty_support_episodes": float(rejected_empty_support_episodes),
                 "rejected_corrupt_depth_episodes": float(rejected_corrupt_depth_episodes),

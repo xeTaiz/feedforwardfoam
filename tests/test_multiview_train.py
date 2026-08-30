@@ -8,9 +8,11 @@ import feedforwardfoam.train as train_module
 from feedforwardfoam.backbone import FrozenGeometryStub
 from feedforwardfoam.data.types import NvsEpisode, View
 from feedforwardfoam.head import CanonicalPowerFoamHead
+from feedforwardfoam.metrics import masked_lpips
 from feedforwardfoam.renderer import _with_contiguous_backward
 from feedforwardfoam.train import (
     EmptySupportMaskError,
+    _batched_backbone_features,
     _episode_objective,
     _metrics,
     _predict,
@@ -168,6 +170,50 @@ def test_splatt3r_masked_mse_sums_rgb_channels_per_supported_pixel():
     assert loss == 3.0
 
 
+def test_masked_objective_averages_targets_instead_of_supported_pixel_counts():
+    predictions = (
+        SimpleNamespace(rgb=torch.ones(2, 2, 3), alpha=torch.ones(2, 2)),
+        SimpleNamespace(rgb=torch.full((2, 2, 3), 0.5), alpha=torch.ones(2, 2)),
+    )
+    masks = [
+        torch.tensor([[True, False], [False, False]]),
+        torch.ones(2, 2, dtype=torch.bool),
+    ]
+    _, rgb_loss, _, _ = _episode_objective(
+        predictions,
+        (_view(0.0), _view(0.0)),
+        rgb_loss_name="mse",
+        alpha_weight=0.0,
+        device=torch.device("cpu"),
+        masks=masks,
+    )
+    assert rgb_loss == pytest.approx((1.0 + 0.25) / 2)
+
+
+def test_masked_lpips_batches_targets_without_changing_per_target_reduction():
+    class PixelError(torch.nn.Module):
+        def forward(self, prediction, target, *, normalize):
+            assert normalize
+            return (prediction - target).square().mean(dim=1, keepdim=True)
+
+    predictions = torch.stack([torch.ones(2, 2, 3), torch.full((2, 2, 3), 0.5)])
+    targets = torch.zeros_like(predictions)
+    masks = torch.stack(
+        [
+            torch.tensor([[True, False], [False, False]]),
+            torch.ones(2, 2, dtype=torch.bool),
+        ]
+    )
+    batched = masked_lpips(PixelError(), predictions, targets, masks)
+    individual = torch.stack(
+        [
+            masked_lpips(PixelError(), prediction, target, mask)
+            for prediction, target, mask in zip(predictions, targets, masks, strict=True)
+        ]
+    ).mean()
+    assert torch.equal(batched, individual)
+
+
 def test_masked_objective_marks_empty_support_as_resampleable():
     prediction = (SimpleNamespace(rgb=torch.ones(2, 2, 3), alpha=torch.ones(2, 2)),)
 
@@ -218,6 +264,26 @@ def _proposal_episode() -> NvsEpisode:
         target=(_posed_view("t0", 0.25, 3),),
         scene_id="stub_scene",
     )
+
+
+def test_batched_backbone_runs_scenes_together_and_splits_features():
+    calls = []
+
+    class CountingBackbone(FrozenGeometryStub):
+        def forward(self, images):
+            calls.append(tuple(images.shape))
+            return super().forward(images)
+
+    episodes = [_proposal_episode(), _proposal_episode()]
+    features = _batched_backbone_features(
+        CountingBackbone(register_dim=8, register_count=2),
+        episodes,
+        torch.device("cpu"),
+    )
+
+    assert calls == [(2, 2, 3, 4, 4)]
+    assert len(features) == 2
+    assert all(feature["depth"].shape[0] == 1 for feature in features)
 
 
 def _proposal_head(

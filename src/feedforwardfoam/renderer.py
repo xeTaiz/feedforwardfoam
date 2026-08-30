@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib
+import math
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -86,7 +87,7 @@ def camera_from_view(view: View, device: torch.device | str):
     c2w = view.c2w.to(device=device, dtype=torch.float32)
     height, width = view.image.shape[:2]
     aspect = width / height
-    half_width = torch.tan(torch.tensor(view.fov_x_radians / 2, device=device))
+    half_width = math.tan(view.fov_x_radians / 2)
     half_height = half_width / aspect
     # Blender/OpenGL camera forward is -Z; TorchCamera uses cross(up, right).
     return TorchCamera(
@@ -95,6 +96,9 @@ def camera_from_view(view: View, device: torch.device | str):
         up=c2w[:3, 1] * half_height,
         width=width,
         height=height,
+        fov_cos_cutoff=math.cos(
+            math.atan(math.sqrt(half_width**2 + half_height**2)) + math.radians(10.0)
+        ),
     )
 
 
@@ -155,8 +159,7 @@ class PowerFoamRendererBridge:
         return scene
 
     @staticmethod
-    def _render_scene(scene, camera) -> FoamRender:
-        result = scene.forward(camera)
+    def _wrap_render(result) -> FoamRender:
         # Warp requires the incoming adjoints to have contiguous inner dimensions.
         # Perceptual losses transpose HWC renders to CHW and otherwise violate that
         # requirement during their backward pass.
@@ -167,10 +170,14 @@ class PowerFoamRendererBridge:
             depth=result[4],
         )
 
+    @classmethod
+    def _render_scene(cls, scene, camera) -> FoamRender:
+        return cls._wrap_render(scene.forward(camera))
+
     def render(self, parameters: FoamParameters, camera) -> FoamRender:
         return self._render_scene(self.build(parameters), camera)
 
     def render_many(self, parameters: FoamParameters, cameras) -> list[FoamRender]:
-        """Build topology once and render every target camera from that scene."""
+        """Build one topology and queue visibility for every target camera."""
         scene = self.build(parameters)
-        return [self._render_scene(scene, camera) for camera in cameras]
+        return [self._wrap_render(result) for result in scene.forward_many(cameras)]

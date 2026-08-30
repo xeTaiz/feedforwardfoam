@@ -53,6 +53,7 @@ data:
 train:
   steps: 50000
   scene_batch_size: 12
+  backbone_batch_size: 4
   episode_prefetch_workers: 4
   learning_rate: 1.0e-05
   learning_rate_schedule: half_decay
